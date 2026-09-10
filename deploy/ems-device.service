@@ -1,0 +1,29 @@
+[Unit]
+Description=EMS read-only edge agent
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ems-device
+Group=ems-device
+SupplementaryGroups=dialout
+WorkingDirectory=/opt/ems-device
+ExecStart=/opt/ems-device/.venv/bin/ems-device --config /etc/ems-device/config.toml run
+Restart=on-failure
+RestartSec=30
+StateDirectory=ems-device
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# PrivateDevices must remain off for the USB serial adapter.
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

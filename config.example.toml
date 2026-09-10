@@ -1,0 +1,17 @@
+platform_url = "https://ems.example.com"
+state_dir = "/var/lib/ems-device"
+device_name = "EMS Pi 4"
+# Optional inventory metadata; never an authentication secret.
+hardware_serial = ""
+reader = "simulator"
+allow_simulated_upload = false
+sample_seconds = 10
+
+# Used only with reader = "modbus"; obtain settings from the exact inverter manual.
+[modbus]
+port = "/dev/serial/by-id/REPLACE_WITH_YOUR_ADAPTER"
+profile = "/etc/ems-device/deye-verified.json"
+device_id = 1
+baudrate = 9600
+parity = "N"
+stopbits = 1

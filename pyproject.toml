@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ems-device"
+version = "0.1.0"
+description = "Read-only EMS edge agent with durable telemetry and platform v1 client"
+requires-python = ">=3.11"
+dependencies = ["httpx==0.28.1", "pymodbus[serial]==3.11.3"]
+
+[project.optional-dependencies]
+test = ["pytest==8.4.2"]
+
+[project.scripts]
+ems-device = "ems_device.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
