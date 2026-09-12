@@ -3,7 +3,9 @@ state_dir = "/var/lib/ems-device"
 device_name = "EMS Pi 4"
 # Optional inventory metadata; never an authentication secret.
 hardware_serial = ""
-reader = "simulator"
+# Safe factory default: enrollment + heartbeat only. Change to "modbus" only
+# after installing a profile verified for the exact inverter/firmware.
+reader = "disabled"
 allow_simulated_upload = false
 sample_seconds = 10
 
