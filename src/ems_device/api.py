@@ -24,5 +24,8 @@ class API:
         response.raise_for_status()
         return response.json()
 
+    def enroll(self, payload):
+        return self.call("POST", "/devices/enroll", payload, authenticated=False)
+
     def close(self):
         self.client.close()

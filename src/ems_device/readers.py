@@ -8,6 +8,7 @@ FIELDS = {"pv_power_w", "load_power_w", "battery_power_w", "grid_power_w", "batt
 
 class Simulator:
     simulated = True
+    telemetry_available = True
     def read(self):
         return {"pv_power_w": 2400, "load_power_w": 1000, "battery_power_w": 800,
                 "grid_power_w": -600, "battery_soc_percent": 55}
@@ -18,6 +19,7 @@ class Simulator:
 
 class ModbusReader:
     simulated = False
+    telemetry_available = True
     def __init__(self, config, client=None):
         profile = json.loads(Path(config["profile"]).read_text())
         if profile.get("verified") is not True or not profile.get("source") or not profile.get("model") or not profile.get("firmware"):
@@ -66,3 +68,16 @@ class ModbusReader:
 
     def close(self):
         self.client.close()
+
+
+class DisabledReader:
+    """Enrollment/heartbeat-only mode used before an audited profile exists."""
+
+    simulated = False
+    telemetry_available = False
+
+    def read(self):
+        raise RuntimeError("telemetry_reader_disabled")
+
+    def close(self):
+        pass

@@ -1,6 +1,5 @@
 import argparse
 import fcntl
-import getpass
 import logging
 import os
 from pathlib import Path
@@ -9,20 +8,27 @@ import signal
 import threading
 import time
 import tomllib
-import uuid
 import httpx
 from .agent import Agent
 from .api import API
-from .readers import ModbusReader, Simulator
+from .readers import DisabledReader, ModbusReader, Simulator
+from .provisioning import accept_enrollment_response, enrollment_payload
 from .state import State
 
 log = logging.getLogger("ems_device")
 
 
+def _retry_delay(response, failures):
+    retry_after = response.headers.get("Retry-After") if response is not None else None
+    if retry_after and retry_after.isdigit():
+        return max(5, min(300, int(retry_after)))
+    return min(300, 2 ** min(failures, 8)) + random.random()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("action", choices=["identity", "enroll", "run"])
+    parser.add_argument("action", choices=["identity", "provision", "run"])
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     os.umask(0o077)
@@ -41,43 +47,76 @@ def main():
     api = reader = None
     try:
         if args.action == "identity":
-            print(state.get("identity"))
+            identity = state.identity()
+            print(f"serial_number={identity['serial_number']}")
+            print(f"installation_uuid={identity['installation_uuid']}")
+            print(f"enrollment_status={state.get('enrollment_status') or 'new'}")
             return
         api = API(settings["platform_url"], state.get("credentials"))
         bound_origin = state.get("platform_origin")
         if bound_origin and bound_origin != api.origin:
             raise ValueError("State is bound to another platform; credentials will not be sent")
-        if args.action == "enroll":
-            if state.get("credentials"):
-                raise ValueError("Already enrolled; use platform revocation/reprovisioning procedure")
-            if state.get("enrollment_pending"):
-                raise ValueError("Previous claim outcome unknown: reconcile in platform before retry")
-            code = getpass.getpass("Station claim code (hidden): ")
+        if args.action == "provision":
+            identity = state.identity()
             state.set("platform_origin", api.origin)
-            state.set("enrollment_pending", True)
-            data = api.call("POST", "/devices/claim", {
-                "claim_code": code, "device_name": settings.get("device_name", "EMS edge"),
-                "hardware_info": {"agent_identity": state.get("identity"),
-                                  "serial": settings.get("hardware_serial", "unspecified")}}, authenticated=False)
-            for key in ("device_id", "station_id"):
-                uuid.UUID(data[key])
-            if not isinstance(data.get("credential_secret"), str) or not data["credential_secret"]:
-                raise ValueError("Invalid claim response")
-            state.set("credentials", {key: data[key] for key in ("device_id", "station_id", "credential_secret")})
-            state.set("enrollment_pending", False)
-            print("Enrolled; credentials stored locally. Start the service.")
+            if state.get("credentials"):
+                status = "assigned"
+                state.set("activation_code", None)
+                identity = state.identity()
+            else:
+                try:
+                    status = accept_enrollment_response(state, api.enroll(enrollment_payload(identity, settings)))
+                except httpx.HTTPError:
+                    # Factory provisioning remains useful during a platform
+                    # outage. The systemd service retries enrollment later.
+                    status = "created-locally; enrollment will retry"
+            print(f"Serial: {identity['serial_number']}")
+            if identity.get("activation_code"):
+                print(f"Device code (keep sealed until customer setup): {identity['activation_code']}")
+            print(f"Enrollment: {status}")
             return
-        if not api.credentials:
-            raise ValueError("Enroll before running")
+
+        stop = threading.Event()
+        signal.signal(signal.SIGTERM, lambda *_: stop.set())
+        signal.signal(signal.SIGINT, lambda *_: stop.set())
+        enrollment_failures = 0
+        while not state.get("credentials") and not stop.is_set():
+            try:
+                state.set("platform_origin", api.origin)
+                status = accept_enrollment_response(
+                    state, api.enroll(enrollment_payload(state.identity(), settings))
+                )
+                if status == "assigned":
+                    api.credentials = state.get("credentials")
+                    break
+                enrollment_failures = 0
+                delay = 30
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (401, 403, 409):
+                    raise ValueError("Enrollment rejected: operator action required") from None
+                enrollment_failures += 1
+                delay = _retry_delay(exc.response, enrollment_failures)
+                log.warning("enrollment_http_error status=%s", exc.response.status_code)
+            except httpx.HTTPError:
+                enrollment_failures += 1
+                delay = _retry_delay(None, enrollment_failures)
+                log.warning("enrollment_offline")
+            if args.once:
+                return
+            stop.wait(delay)
+        if stop.is_set():
+            return
         mode = settings["reader"]
-        if mode == "simulator":
+        if mode == "disabled":
+            reader = DisabledReader()
+        elif mode == "simulator":
             if settings.get("allow_simulated_upload") is not True:
                 raise ValueError("Simulator upload needs explicit allow_simulated_upload=true on a demo station")
             reader = Simulator()
         elif mode == "modbus":
             reader = ModbusReader(settings["modbus"])
         else:
-            raise ValueError("reader must be simulator or modbus")
+            raise ValueError("reader must be disabled, simulator or modbus")
         interval = settings.get("sample_seconds", 10)
         if type(interval) not in (int, float) or not 5 <= interval <= 3600:
             raise ValueError("sample_seconds must be 5..3600")
@@ -94,18 +133,16 @@ def main():
             if not state.get("station_config"):
                 raise
             log.warning("startup_offline: using cached policy for read-only monitoring")
-        stop = threading.Event()
-        signal.signal(signal.SIGTERM, lambda *_: stop.set())
-        signal.signal(signal.SIGINT, lambda *_: stop.set())
         next_sync = next_upload = 0.0
         failures = 0
         while not stop.is_set():
             now = time.monotonic()
             # Local sampling continues when cloud is offline; only network retries back off.
-            try:
-                agent.sample()
-            except Exception as exc:
-                log.warning("sample_failed type=%s", type(exc).__name__)
+            if reader.telemetry_available:
+                try:
+                    agent.sample()
+                except Exception as exc:
+                    log.warning("sample_failed type=%s", type(exc).__name__)
             if now >= next_upload:
                 try:
                     if now >= next_sync:

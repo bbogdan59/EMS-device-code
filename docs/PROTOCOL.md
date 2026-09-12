@@ -6,12 +6,18 @@ Contract inspectat în `bbogdan59/EMS-management-platform`, baza inițială `d14
 
 | Operație | Endpoint | Comportament agent |
 |---|---|---|
-| Asociere | POST /api/v1/devices/claim | cod temporar + device_name + hardware_info; salvează device_id/station_id/credential_secret |
+| Enrollment | POST /api/v1/devices/enroll | UUID + secret de provisioning + serial + cod de activare; pending până la claim-ul clientului |
 | Configurație | GET /api/v1/config | cache config_version/preference_version; nu confirmă aplicarea în invertor |
 | Prezență | POST /api/v1/devices/heartbeat | boot_id, firmware_version agent, telemetry=true, inverter_write=false |
 | Telemetrie | POST /api/v1/telemetry/batch | items; elimină batch numai când accepted+duplicates acoperă toate elementele și rejected=0 |
 
-Autentificare `Authorization: Bearer <device_id>.<credential_secret>` prin HTTPS verificat. Redirect-urile nu sunt urmate. UUID-ul local este inventar; nu secret și nu mecanism pentru alegerea tenant-ului. Raspberry Pi nu necesită IMEI; eventualul IMEI al unui modem este tot metadată de inventar.
+Înainte de assignment, dovada device-ului este `provisioning_secret`, generat și
+păstrat local. După assignment, autentificarea este `Authorization: Bearer
+<device_id>.<credential_secret>` prin HTTPS verificat. Redirect-urile nu sunt
+urmate. Serialul public este inventar, nu secret și nu alege tenant-ul. Codul de
+activare este un bearer secret separat, cu entropie mare, livrat sigilat
+clientului și invalidat după primul claim reușit. Raspberry Pi nu necesită IMEI;
+eventualul IMEI al unui modem este tot metadată de inventar.
 
 ## Mostre
 
@@ -38,12 +44,22 @@ PyModbus 3.11.3, [API oficial](https://pymodbus.readthedocs.io/en/v3.11.3/source
 
 Nu există adrese demonstrative care ar putea fi confundate cu registre DEYE reale. Profilul minim are 1..32 puncte. 32-bit, word-order, sentinele de indisponibilitate, identitate invertor, gruparea blocurilor și detectarea modelului sunt în backlog. Un profil local greșit poate produce valori plauzibile: validarea hardware rămâne obligatorie.
 
-## Flux propus ulterior (nu este implementat)
+## Flux de instalare și stadiu
 
-1. Device nou face enrollment autentificat cu cheie proprie/provisioning secret; primește starea pending, fără tenant ales de client.
-2. Operatorul autorizat îl alocă unei stații/tenant, cu audit și protecție împotriva însușirii prin serie ghicită.
-3. Serverul livrează configurația de conexiune și configurația dorită versionată.
-4. Device identifică modelul/firmware-ul, citește numai registrele cunoscute și raportează snapshot-ul observat cu proveniență și hash.
-5. Schimbările web devin comenzi limitate în timp și idempotente, cu allowlist pe model. Device verifică limitele locale, scrie și face readback; raportează applied/rejected/failed.
+1. `run.sh` generează material unic după instalarea OS, îl păstrează cu mod
+   `0600` în SQLite și încearcă enrollment-ul.
+2. Agentul neasociat face polling cu backoff; nu descarcă config de tenant și
+   nu pornește RS485 înainte de assignment.
+3. Clientul introduce codul de activare sigilat în platformă. Serverul îl
+   consumă atomic și leagă device-ul pending de stația autorizată.
+4. Agentul recuperează idempotent credentiala bootstrap și face primul
+   heartbeat autentificat. Codul de activare local este șters.
+5. Serverul livrează configurația versionată. Modul `disabled` rămâne sigur
+   până la disponibilitatea unui profil DEYE validat.
+
+Pașii 1, 2, 4 și modul sigur sunt implementați în agent. Claim-ul self-service
+din pasul 3 este contractul comun cu `EMS-management-platform#44`. Transferul,
+revocarea/factory reset, identificarea DEYE și desired/reported complet rămân
+work items separate.
 
 Nu promite controlul tuturor parametrilor sau aplicare instantanee. Registrele de protecție a rețelei și parametrii instalatorului necesită o politică distinctă. La pierderea cloud-ului, acest subset nu modifică regimul invertorului.

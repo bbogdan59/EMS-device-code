@@ -4,8 +4,8 @@ Primul subset funcțional al controllerului local Python pentru EMS. **v0.1 este
 
 ## Implementat
 
-- UUID persistent al instalației, distinct de `device_id` atribuit de server și seria invertorului.
-- Asociere prin cod temporar creat în platformă pentru o stație; credentiale locale cu permisiuni restrictive și legate de originea HTTPS.
+- Identitate unică generată după instalarea OS: UUID intern, serial public, cod de activare pentru client și secret de provisioning local.
+- Enrollment automat idempotent, stare pending și polling până când clientul asociază device-ul; nu mai este necesar codul temporar de 15 minute în CLI.
 - Citire periodică `/api/v1/config`, cache local și heartbeat cu capabilități reale.
 - Telemetrie PV, consum, grid, putere baterie și SOC; valori necunoscute omise, fără zero inventat.
 - Outbox SQLite persistent, batch-uri de 50, retry cu backoff, identificatori stabili pentru deduplicare după timeout/restart.
@@ -20,36 +20,54 @@ Recomandare pentru Raspberry Pi 4 4GB: **Raspberry Pi OS Lite 64-bit**, fără d
 
 Pinout-ul, portul corect, baud/parity, terminarea și posibilitatea de a partaja magistrala trebuie verificate în documentația modelului exact. Un singur master pe segmentul RS485. Nu confunda conectorul BMS/CAN cu portul Modbus. Agentul nu scanează adrese sau baudrate-uri automat.
 
-## Instalare pe Pi
+## Cele două etape de instalare
 
-Din checkout-ul repository-ului:
+### 1. Tehnician: pregătirea unității
+
+Recomandarea este Raspberry Pi OS Lite 64-bit. După primul boot al unei imagini
+curate, tehnicianul rulează:
 
 ```sh
-sudo apt update
-sudo apt install python3-venv git
-sudo useradd --system --user-group --home-dir /var/lib/ems-device --create-home ems-device
-sudo usermod -aG dialout ems-device
-sudo mkdir -p /opt/ems-device /etc/ems-device
-sudo cp -r src pyproject.toml /opt/ems-device/
-sudo python3 -m venv /opt/ems-device/.venv
-sudo /opt/ems-device/.venv/bin/pip install /opt/ems-device
-sudo install -m 640 -o root -g ems-device config.example.toml /etc/ems-device/config.toml
+git clone https://github.com/bbogdan59/EMS-device-code.git
+cd EMS-device-code
+sudo EMS_PLATFORM_URL=https://ems.example.com ./run.sh
 ```
 
-Editează URL-ul, reader-ul și portul/profilul dacă ai hardware validat. Exemplul refuză implicit upload-ul simulatorului. Pentru demo setează `allow_simulated_upload=true` și folosește **o stație demo dedicată în shadow**; platforma actuală nu garantează excluderea fixture-urilor din optimizare.
+`run.sh` este repetabil: instalează dependențele, utilizatorul izolat, virtualenv-ul,
+configurația inițială și serviciul systemd. Identitatea este creată în
+`/var/lib/ems-device`, nu în checkout sau în imaginea OS. La final afișează:
 
-În platforma web creează stația și generează codul de asociere. Agentul nu alege tenant-ul prin seria declarată:
+- seria publică, pentru suport/inventar;
+- un `Device code` cu entropie mare, care trebuie tipărit în interiorul sau pe
+  sigiliul pachetului și nu publicat în poze/listări;
+- starea enrollment-ului.
+
+Configurația sigură implicită este `reader="disabled"`: device-ul se poate
+înregistra și trimite heartbeat, dar nu pretinde că citește invertorul. Trecerea
+la `modbus` se face numai după instalarea unui profil validat pentru modelul și
+firmware-ul DEYE exact. Pentru update: `git pull && sudo ./run.sh`; fișierul de
+config și identitatea existentă sunt păstrate.
+
+Nu clona `/var/lib/ems-device`: conține secretul unic al unității. O imagine OS
+de producție trebuie să lase acel director gol, astfel încât fiecare unitate să
+primească altă identitate la provisioning.
+
+### 2. Client: instalarea acasă
+
+Clientul conectează alimentarea/rețeaua și adaptorul RS485, apoi introduce
+`Device code` de pe eticheta sigilată în stația sa din platforma web. Agentul
+face numai conexiuni HTTPS outbound și verifică periodic assignment-ul. După
+asociere primește credentiala device-ului, o stochează local și începe să ia
+configurația stației. Clientul nu editează fișiere, nu intră prin SSH și nu
+sincronizează o fereastră de 15 minute cu tehnicianul.
+
+Diagnostic sigur, fără afișarea secretelor:
 
 ```sh
 sudo -u ems-device /opt/ems-device/.venv/bin/ems-device --config /etc/ems-device/config.toml identity
-sudo -u ems-device /opt/ems-device/.venv/bin/ems-device --config /etc/ems-device/config.toml enroll
-sudo install -m 644 deploy/ems-device.service /etc/systemd/system/ems-device.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now ems-device
 journalctl -u ems-device -f
+systemctl status ems-device
 ```
-
-Codul este cerut prin prompt ascuns, nu argument shell. O cerere claim cu rezultat necunoscut nu este repetată automat: serverul actual consumă codul și returnează secretul o singură dată. Operatorul trebuie să reconcilieze/revoce asocierea și să reprovisioneze cu un cod nou. Nu șterge starea ca metodă obișnuită de retry. Nu clona directorul `/var/lib/ems-device` pe alte dispozitive; conține identitatea și credentialele. Reinstalarea fără acest director creează altă identitate.
 
 `--once` execută un ciclu de diagnostic, nu certifică sănătatea sistemului; inspectează logurile. Nu deschide porturi inbound; conexiunile spre web sunt outbound HTTPS.
 
@@ -67,7 +85,7 @@ CI verifică Python 3.11 și 3.13. Testele MockTransport și Modbus fake nu repr
 
 Vezi [docs/PROTOCOL.md](docs/PROTOCOL.md) pentru API, semne, coadă, profil și extensiile necesare. Frecvența implicită este 10 secunde, nu timp real garantat. Coada păstrează maximum 17.280 mostre (aproximativ 48 ore la 10 secunde); când este plină, refuză mostre noi și raportează eroare, păstrând mostrele vechi. La respingere parțială server-side întregul batch rămâne în coadă: rezolvarea per-item/dead-letter este un pas ulterior. Sincronizarea ceasului prin OS/NTP este necesară.
 
-Implementările viitoare sunt urmărite prin GitHub issues în acest repo și în EMS-management-platform: enrollment automat nealocat, configurație desired/reported, profil DEYE verificat, contoare/diagnoză și scrieri controlate cu readback.
+Implementările viitoare sunt urmărite prin GitHub issues în acest repo și în EMS-management-platform: self-service claim în web, transfer/factory reset, configurație desired/reported, profil DEYE verificat, contoare/diagnoză și scrieri controlate cu readback.
 
 ## Următorii pași, în paralel
 

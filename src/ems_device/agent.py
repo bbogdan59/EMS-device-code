@@ -27,7 +27,7 @@ class Agent:
         self.state.set("station_config", config)
         self.api.call("POST", "/devices/heartbeat", {
             "boot_id": self.boot_id, "firmware_version": __version__,
-            "capabilities": {"telemetry": True, "inverter_write": False,
+            "capabilities": {"telemetry": self.reader.telemetry_available, "inverter_write": False,
                              "simulated": self.reader.simulated}})
 
     def sample(self):
