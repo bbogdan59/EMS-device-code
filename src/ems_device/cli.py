@@ -1,5 +1,6 @@
 import argparse
 import fcntl
+import json
 import logging
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import threading
 import time
 import tomllib
 import httpx
+from . import __version__
 from .agent import Agent
 from .api import API
 from .readers import DisabledReader, ModbusReader, Simulator
@@ -16,6 +18,11 @@ from .provisioning import accept_enrollment_response, enrollment_payload
 from .state import State
 
 log = logging.getLogger("ems_device")
+
+
+def _clock_sync_status(marker=Path("/run/systemd/timesync/synchronized")):
+    """Conservator: absenta markerului nu este echivalenta cu ceas nesincronizat."""
+    return "synchronized" if marker.exists() else "unknown"
 
 
 def _retry_delay(response, failures):
@@ -28,7 +35,7 @@ def _retry_delay(response, failures):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("action", choices=["identity", "provision", "run"])
+    parser.add_argument("action", choices=["health", "identity", "provision", "run"])
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     os.umask(0o077)
@@ -51,6 +58,11 @@ def main():
             print(f"serial_number={identity['serial_number']}")
             print(f"installation_uuid={identity['installation_uuid']}")
             print(f"enrollment_status={state.get('enrollment_status') or 'new'}")
+            return
+        if args.action == "health":
+            print(json.dumps(state.health_snapshot(
+                agent_version=__version__, clock_sync=_clock_sync_status()
+            ), sort_keys=True))
             return
         api = API(settings["platform_url"], state.get("credentials"))
         bound_origin = state.get("platform_origin")

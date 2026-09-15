@@ -7,6 +7,7 @@ FIELDS = {"pv_power_w", "load_power_w", "battery_power_w", "grid_power_w", "batt
 
 
 class Simulator:
+    kind = "simulator"
     simulated = True
     telemetry_available = True
     def read(self):
@@ -18,6 +19,7 @@ class Simulator:
 
 
 class ModbusReader:
+    kind = "modbus"
     simulated = False
     telemetry_available = True
     def __init__(self, config, client=None):
@@ -75,6 +77,7 @@ class DisabledReader:
 
     simulated = False
     telemetry_available = False
+    kind = "disabled"
 
     def read(self):
         raise RuntimeError("telemetry_reader_disabled")

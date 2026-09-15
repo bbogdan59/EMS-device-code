@@ -65,11 +65,20 @@ Diagnostic sigur, fără afișarea secretelor:
 
 ```sh
 sudo -u ems-device /opt/ems-device/.venv/bin/ems-device --config /etc/ems-device/config.toml identity
+sudo -u ems-device /opt/ems-device/.venv/bin/ems-device --config /etc/ems-device/config.toml health
 journalctl -u ems-device -f
 systemctl status ems-device
 ```
 
 `--once` execută un ciclu de diagnostic, nu certifică sănătatea sistemului; inspectează logurile. Nu deschide porturi inbound; conexiunile spre web sunt outbound HTTPS.
+
+Comanda `health` produce JSON fără secrete cu versiunea agentului, integritatea
+SQLite, utilizarea și vechimea cozii, mostre refuzate, ultimele momente de
+citire/upload/config și contoare de erori (inclusiv RS485). Scrierile timestamp
+de succes sunt limitate la una pe minut pentru a reduce uzura SD. Starea
+`clock_sync=unknown` înseamnă că markerul systemd-timesyncd nu este disponibil,
+nu dovedește că ceasul este greșit; imaginile care folosesc alt daemon NTP
+trebuie să adauge o verificare specifică și testată.
 
 ## Dezvoltare
 
@@ -83,7 +92,7 @@ CI verifică Python 3.11 și 3.13. Testele MockTransport și Modbus fake nu repr
 
 ## Limite și contracte
 
-Vezi [docs/PROTOCOL.md](docs/PROTOCOL.md) pentru API, semne, coadă, profil și extensiile necesare. Frecvența implicită este 10 secunde, nu timp real garantat. Coada păstrează maximum 17.280 mostre (aproximativ 48 ore la 10 secunde); când este plină, refuză mostre noi și raportează eroare, păstrând mostrele vechi. La respingere parțială server-side întregul batch rămâne în coadă: rezolvarea per-item/dead-letter este un pas ulterior. Sincronizarea ceasului prin OS/NTP este necesară.
+Vezi [docs/PROTOCOL.md](docs/PROTOCOL.md) pentru API, semne, coadă, profil și extensiile necesare. Frecvența implicită este 10 secunde, nu timp real garantat. Coada păstrează maximum 17.280 mostre (aproximativ 48 ore la 10 secunde); când este plină, refuză mostre noi, incrementează contorul health și păstrează mostrele vechi. SQLite rulează WAL + `synchronous=FULL`; asta reduce riscul la întreruperea procesului/alimentării, dar nu înlocuiește teste reale cu SD și power-cut. La respingere parțială server-side întregul batch rămâne în coadă: platforma oferă încă doar ACK agregat, deci retry selectiv/dead-letter per item rămân blocate de contractul web #18. Sincronizarea ceasului prin OS/NTP este necesară.
 
 Implementările viitoare sunt urmărite prin GitHub issues în acest repo și în EMS-management-platform: self-service claim în web, transfer/factory reset, configurație desired/reported, profil DEYE verificat, contoare/diagnoză și scrieri controlate cu readback.
 
