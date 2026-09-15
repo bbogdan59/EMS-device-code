@@ -25,6 +25,12 @@ class State:
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS outbox (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS dead_letter (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_outbox_id INTEGER NOT NULL UNIQUE,
+                payload TEXT NOT NULL,
+                reason_code TEXT NOT NULL,
+                failed_at TEXT NOT NULL);
         """)
         self.capacity = capacity
         self.path = path
@@ -141,6 +147,7 @@ class State:
         count = self.db.execute("SELECT count(*) FROM outbox").fetchone()[0]
         oldest = self.db.execute("SELECT payload FROM outbox ORDER BY id LIMIT 1").fetchone()
         newest = self.db.execute("SELECT payload FROM outbox ORDER BY id DESC LIMIT 1").fetchone()
+        dead_letter_count = self.db.execute("SELECT count(*) FROM dead_letter").fetchone()[0]
 
         def measured_at(row):
             return (json.loads(row[0]).get("measured_at") if row else None)
@@ -159,6 +166,7 @@ class State:
                 "newest_measured_at": measured_at(newest),
                 "storage_bytes": sum(path.stat().st_size for path in files if path.exists()),
             },
+            "dead_letter_count": dead_letter_count,
             **self._health(),
         }
 
@@ -169,6 +177,44 @@ class State:
     def acknowledge(self, ids):
         with self.db:
             self.db.executemany("DELETE FROM outbox WHERE id=?", [(i,) for i in ids])
+
+    def apply_item_receipts(self, acknowledged_ids, permanent_rejections, *, now=None):
+        """Atomically delete successful items and quarantine permanent rejects.
+
+        `permanent_rejections` contains `(outbox_id, reason_code)`. Payloads are
+        copied inside the same transaction before deletion, so a crash cannot
+        create the silent-loss window that separate operations would have.
+        """
+        now = now or datetime.now(timezone.utc)
+        remove_ids = list(acknowledged_ids)
+        with self.db:
+            for outbox_id, reason_code in permanent_rejections:
+                row = self.db.execute("SELECT payload FROM outbox WHERE id=?", (outbox_id,)).fetchone()
+                if row is None:
+                    raise ValueError("receipt references missing outbox item")
+                self.db.execute(
+                    "INSERT INTO dead_letter(original_outbox_id,payload,reason_code,failed_at) VALUES (?,?,?,?)",
+                    (outbox_id, row[0], reason_code, now.isoformat()),
+                )
+                remove_ids.append(outbox_id)
+            self.db.executemany("DELETE FROM outbox WHERE id=?", [(item_id,) for item_id in remove_ids])
+
+    def dead_letters(self, limit=100):
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError("dead-letter limit must be 1..1000")
+        rows = self.db.execute(
+            "SELECT payload,reason_code,failed_at FROM dead_letter ORDER BY id DESC LIMIT ?", (limit,)
+        )
+        return [
+            {
+                "boot_id": payload.get("boot_id"),
+                "sequence": payload.get("sequence"),
+                "reason_code": reason,
+                "failed_at": failed_at,
+            }
+            for raw_payload, reason, failed_at in rows
+            for payload in [json.loads(raw_payload)]
+        ]
 
     def close(self):
         self.db.close()

@@ -35,7 +35,7 @@ def _retry_delay(response, failures):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("action", choices=["health", "identity", "provision", "run"])
+    parser.add_argument("action", choices=["dead-letter", "health", "identity", "provision", "run"])
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     os.umask(0o077)
@@ -63,6 +63,9 @@ def main():
             print(json.dumps(state.health_snapshot(
                 agent_version=__version__, clock_sync=_clock_sync_status()
             ), sort_keys=True))
+            return
+        if args.action == "dead-letter":
+            print(json.dumps(state.dead_letters(), sort_keys=True))
             return
         api = API(settings["platform_url"], state.get("credentials"))
         bound_origin = state.get("platform_origin")
