@@ -44,6 +44,77 @@ def test_ambiguous_receipt_preserves_queue(tmp_path, receipt):
     state.close(); api.close()
 
 
+def test_per_item_receipt_retries_only_retryable_and_quarantines_permanent(tmp_path):
+    state = State(tmp_path)
+    for sequence in (1, 2, 3, 4):
+        state.enqueue({'boot_id': 'per-item', 'sequence': sequence, 'measured_at': '2026-01-01T00:00:00+00:00'})
+    response = {
+        'accepted': 1,
+        'duplicates': 1,
+        'rejected': 2,
+        'errors': ['legacy messages remain ignored by the new client'],
+        'results': [
+            {'boot_id': 'per-item', 'sequence': 1, 'status': 'accepted', 'retryable': False, 'reason_code': None},
+            {'boot_id': 'per-item', 'sequence': 2, 'status': 'duplicate', 'retryable': False, 'reason_code': None},
+            {'boot_id': 'per-item', 'sequence': 3, 'status': 'rejected', 'retryable': True, 'reason_code': 'future_timestamp'},
+            {'boot_id': 'per-item', 'sequence': 4, 'status': 'rejected', 'retryable': False, 'reason_code': 'timestamp_too_old'},
+        ],
+    }
+    api = API('https://ems.example.com', CREDS, transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json=response)
+    ))
+
+    Agent(state, api, Simulator()).upload()
+
+    assert [item['sequence'] for _, item in state.pending()] == [3]
+    dead_letters = state.dead_letters()
+    assert len(dead_letters) == 1
+    assert {key: dead_letters[0][key] for key in ('boot_id', 'sequence', 'reason_code')} == {
+        'boot_id': 'per-item', 'sequence': 4, 'reason_code': 'timestamp_too_old'
+    }
+    assert state.health_snapshot(agent_version='test', clock_sync='unknown')['dead_letter_count'] == 1
+    state.close(); api.close()
+
+
+@pytest.mark.parametrize('mutate', [
+    lambda results: results.pop(),
+    lambda results: results[0].update(sequence=999),
+    lambda results: results[0].update(status='accepted', retryable=True),
+])
+def test_malformed_per_item_receipt_preserves_entire_queue(tmp_path, mutate):
+    state = State(tmp_path)
+    state.enqueue({'boot_id': 'safe', 'sequence': 1})
+    results = [{'boot_id': 'safe', 'sequence': 1, 'status': 'accepted', 'retryable': False, 'reason_code': None}]
+    mutate(results)
+    response = {'accepted': 1, 'duplicates': 0, 'rejected': 0, 'errors': [], 'results': results}
+    api = API('https://ems.example.com', CREDS, transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json=response)
+    ))
+
+    with pytest.raises((TypeError, ValueError)):
+        Agent(state, api, Simulator()).upload()
+
+    assert len(state.pending()) == 1
+    assert state.dead_letters() == []
+    state.close(); api.close()
+
+
+def test_receipt_aggregate_mismatch_preserves_entire_queue(tmp_path):
+    state = State(tmp_path)
+    state.enqueue({'boot_id': 'safe', 'sequence': 1})
+    response = {
+        'accepted': 0, 'duplicates': 1, 'rejected': 0, 'errors': [],
+        'results': [{'boot_id': 'safe', 'sequence': 1, 'status': 'accepted', 'retryable': False, 'reason_code': None}],
+    }
+    api = API('https://ems.example.com', CREDS, transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json=response)
+    ))
+    with pytest.raises(ValueError, match='aggregate_mismatch'):
+        Agent(state, api, Simulator()).upload()
+    assert len(state.pending()) == 1
+    state.close(); api.close()
+
+
 def test_network_error_preserves_queue(tmp_path):
     def fail(request): raise httpx.ConnectError('offline')
     state = State(tmp_path)

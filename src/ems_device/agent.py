@@ -81,10 +81,49 @@ class Agent:
             if any(type(c) is not int or c < 0 for c in counts):
                 raise ValueError("invalid_batch_receipt")
             accepted, duplicates, rejected = counts
-            if rejected or accepted + duplicates != len(rows):
-                raise ValueError("partial_batch_rejection: queue retained for operator investigation")
-            self.state.acknowledge([i for i, _ in rows])
+            item_results = result.get("results")
+            if item_results is None:
+                # Compatibilitate cu platforma veche: fara identitatea fiecarui
+                # rezultat, numai succesul integral poate sterge date in siguranta.
+                if rejected or accepted + duplicates != len(rows):
+                    raise ValueError("partial_batch_rejection: queue retained for operator investigation")
+                self.state.acknowledge([i for i, _ in rows])
+            else:
+                acknowledged, permanent = self._validate_item_receipts(rows, item_results, counts)
+                self.state.apply_item_receipts(acknowledged, permanent)
             self._record_success("upload")
         except Exception as exc:
             self._record_error("upload", exc)
             raise
+
+    @staticmethod
+    def _validate_item_receipts(rows, item_results, aggregate_counts):
+        """Validate the complete response before mutating the durable queue."""
+        if not isinstance(item_results, list) or len(item_results) != len(rows):
+            raise ValueError("invalid_item_receipt_count")
+        statuses = {"accepted": 0, "duplicate": 0, "rejected": 0}
+        acknowledged = []
+        permanent = []
+        for (outbox_id, payload), receipt in zip(rows, item_results, strict=True):
+            if not isinstance(receipt, dict):
+                raise ValueError("invalid_item_receipt")
+            if receipt.get("boot_id") != payload.get("boot_id") or receipt.get("sequence") != payload.get("sequence"):
+                raise ValueError("item_receipt_identity_mismatch")
+            status = receipt.get("status")
+            retryable = receipt.get("retryable")
+            reason = receipt.get("reason_code")
+            if status not in statuses or type(retryable) is not bool:
+                raise ValueError("invalid_item_receipt")
+            if status in {"accepted", "duplicate"}:
+                if retryable or reason is not None:
+                    raise ValueError("invalid_success_item_receipt")
+                acknowledged.append(outbox_id)
+            elif not isinstance(reason, str) or not reason or len(reason) > 120:
+                raise ValueError("invalid_rejection_reason")
+            elif not retryable:
+                permanent.append((outbox_id, reason))
+            statuses[status] += 1
+
+        if [statuses["accepted"], statuses["duplicate"], statuses["rejected"]] != aggregate_counts:
+            raise ValueError("item_receipt_aggregate_mismatch")
+        return acknowledged, permanent
