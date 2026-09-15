@@ -5,7 +5,7 @@ import httpx
 import pytest
 from ems_device.agent import Agent
 from ems_device.api import API
-from ems_device.cli import _retry_delay
+from ems_device.cli import _clock_sync_status, _retry_delay
 from ems_device.provisioning import accept_enrollment_response, enrollment_payload
 from ems_device.readers import DisabledReader, ModbusReader, Simulator
 from ems_device.state import State
@@ -51,6 +51,7 @@ def test_network_error_preserves_queue(tmp_path):
     agent = Agent(state, api, Simulator()); agent.sample()
     with pytest.raises(httpx.ConnectError): agent.upload()
     assert len(state.pending()) == 1
+    assert state.health_snapshot(agent_version='test', clock_sync='unknown')['upload_errors'] == 1
     state.close(); api.close()
 
 
@@ -59,7 +60,75 @@ def test_bounded_queue_preserves_oldest(tmp_path):
     state.enqueue({'sequence': 1})
     with pytest.raises(BufferError): state.enqueue({'sequence': 2})
     assert state.pending()[0][1]['sequence'] == 1
+    assert state.health_snapshot(agent_version='test', clock_sync='unknown')['refused_samples'] == 1
     state.close()
+
+
+def test_health_snapshot_reports_backlog_storage_and_unknowns(tmp_path):
+    state = State(tmp_path, capacity=4)
+    state.enqueue({'sequence': 1, 'measured_at': '2026-01-01T00:00:00+00:00'})
+    state.enqueue({'sequence': 2, 'measured_at': '2026-01-01T00:00:10+00:00'})
+    snapshot = state.health_snapshot(agent_version='0.test', clock_sync='unknown')
+    assert snapshot['agent_version'] == '0.test'
+    assert snapshot['clock_sync'] == 'unknown'
+    assert snapshot['database_ok'] is True
+    assert snapshot['outbox']['backlog'] == 2
+    assert snapshot['outbox']['capacity'] == 4
+    assert snapshot['outbox']['utilization_percent'] == 50.0
+    assert snapshot['outbox']['oldest_measured_at'] == '2026-01-01T00:00:00+00:00'
+    assert snapshot['outbox']['newest_measured_at'] == '2026-01-01T00:00:10+00:00'
+    assert snapshot['outbox']['storage_bytes'] > 0
+    assert 'provisioning_secret' not in json.dumps(snapshot)
+    for suffix in ('', '-wal', '-shm'):
+        path = tmp_path / f'agent.sqlite{suffix}'
+        if path.exists():
+            assert path.stat().st_mode & 0o777 == 0o600
+    state.close()
+
+
+def test_invalid_outbox_capacity_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match='positive integer'):
+        State(tmp_path, capacity=0)
+
+
+def test_health_success_is_throttled_and_errors_are_persistent(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    state = State(tmp_path)
+    first = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state.record_success('sample', now=first)
+    state.record_success('sample', now=first + timedelta(seconds=10))
+    assert state.health_snapshot(agent_version='test', clock_sync='unknown')['last_sample_at'] == first.isoformat()
+    state.record_error('sample', 'serial_unavailable', rs485=True, now=first)
+    state.close()
+
+    reopened = State(tmp_path)
+    snapshot = reopened.health_snapshot(agent_version='test', clock_sync='unknown')
+    assert snapshot['sample_errors'] == 1
+    assert snapshot['rs485_errors'] == 1
+    assert snapshot['last_error_code'] == 'serial_unavailable'
+    reopened.close()
+
+
+def test_backward_clock_step_is_visible_and_does_not_freeze_timestamp(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    state = State(tmp_path)
+    first = datetime(2026, 1, 1, 1, tzinfo=timezone.utc)
+    state.record_success('sample', now=first)
+    earlier = first - timedelta(minutes=5)
+    state.record_success('sample', now=earlier)
+    snapshot = state.health_snapshot(agent_version='test', clock_sync='unknown')
+    assert snapshot['clock_regressions'] == 1
+    assert snapshot['last_sample_at'] == earlier.isoformat()
+    state.close()
+
+
+def test_clock_sync_marker_is_conservative(tmp_path):
+    marker = tmp_path / 'synchronized'
+    assert _clock_sync_status(marker) == 'unknown'
+    marker.touch()
+    assert _clock_sync_status(marker) == 'synchronized'
 
 
 def test_sync_contract_no_write(tmp_path):
@@ -112,6 +181,21 @@ def test_bad_response_no_zero(tmp_path):
         def connect(self): return True
         def read_holding_registers(self, *args, **kwargs): return SimpleNamespace(isError=lambda: True)
     with pytest.raises(OSError): ModbusReader(profile(tmp_path), Fake()).read()
+
+
+def test_modbus_sample_failure_increments_rs485_health(tmp_path):
+    class Fake:
+        def connect(self): return False
+        def close(self): pass
+
+    state = State(tmp_path / 'state')
+    reader = ModbusReader(profile(tmp_path), Fake())
+    with pytest.raises(OSError):
+        Agent(state, None, reader).sample()
+    snapshot = state.health_snapshot(agent_version='test', clock_sync='unknown')
+    assert snapshot['sample_errors'] == 1
+    assert snapshot['rs485_errors'] == 1
+    state.close()
 
 
 def test_nan_not_enqueued(tmp_path):
