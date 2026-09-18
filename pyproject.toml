@@ -14,6 +14,7 @@ test = ["pytest==8.4.2"]
 
 [project.scripts]
 ems-device = "ems_device.cli:main"
+ems-device-update = "ems_device.updater:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

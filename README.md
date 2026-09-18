@@ -45,8 +45,27 @@ configurația inițială și serviciul systemd. Identitatea este creată în
 Configurația sigură implicită este `reader="disabled"`: device-ul se poate
 înregistra și trimite heartbeat, dar nu pretinde că citește invertorul. Trecerea
 la `modbus` se face numai după instalarea unui profil validat pentru modelul și
-firmware-ul DEYE exact. Pentru update: `git pull && sudo ./run.sh`; fișierul de
-config și identitatea existentă sunt păstrate.
+firmware-ul DEYE exact. `git pull && sudo ./run.sh` este doar fluxul manual de
+bootstrap/dezvoltare; fișierul de config și identitatea existentă sunt păstrate.
+
+### Update verificat și rollback
+
+Producția trebuie să publice un `manifest.json` cu exact câmpurile `version`,
+`url` (arhivă `.tar.gz` HTTPS) și `sha256`, plus semnătura detached
+`manifest.json.minisig`. Cheia privată nu ajunge pe device. Operatorul fixează
+cheia publică minisign dintr-un canal separat și rulează, ca root:
+
+```sh
+/opt/ems-device/current/.venv/bin/ems-device-update \
+  --public-key 'RW...' https://updates.example.com/stable/manifest.json
+```
+
+Updaterul refuză HTTP, redirect-uri, manifesturi cu alte câmpuri, hash-uri
+greșite și arhive cu traversal/link-uri. Instalează într-un director nou,
+construiește un virtualenv izolat, execută `health`, apoi schimbă atomic symlink-ul
+`/opt/ems-device/current`. Dacă serviciul nu devine activ, restaurează release-ul
+anterior și îl repornește. Descărcarea periodică nu este activată implicit:
+fereastra de mentenanță și politica de rollout rămân decizia operatorului.
 
 Nu clona `/var/lib/ems-device`: conține secretul unic al unității. O imagine OS
 de producție trebuie să lase acel director gol, astfel încât fiecare unitate să
@@ -97,7 +116,10 @@ python3 -m venv .venv
 .venv/bin/pytest -q
 ```
 
-CI verifică Python 3.11 și 3.13. Testele MockTransport și Modbus fake nu reprezintă validare pe Pi/invertor sau integrare cu un server web real.
+CI verifică Python 3.11 și 3.13. Testele MockTransport, Modbus fake și updater
+mock nu reprezintă validare pe Pi/invertor, power-cut sau integrare cu un server
+web real. Rollback-ul testat local acoperă eșecul verificării systemd, nu o
+întrerupere fizică în timpul schimbării release-ului.
 
 ## Limite și contracte
 
