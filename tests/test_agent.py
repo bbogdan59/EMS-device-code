@@ -214,13 +214,65 @@ def test_sync_contract_no_write(tmp_path):
             return httpx.Response(200, json={'station_id': CREDS['station_id'], 'execution_mode': 'live',
                                             'config_version': 1, 'preference_version': 1})
         assert request.url.path == '/api/v1/devices/heartbeat'
-        assert json.loads(request.content)['capabilities']['inverter_write'] is False
+        heartbeat_body = json.loads(request.content)
+        assert heartbeat_body['capabilities']['inverter_write'] is False
+        assert isinstance(heartbeat_body['system_stats'], dict)  # never fabricated, but always present as a dict
         return httpx.Response(200, json={})
     state = State(tmp_path)
     api = API('https://ems.example.com', CREDS, transport=httpx.MockTransport(handler))
     Agent(state, api, Simulator()).sync()
     assert state.get('station_config')['execution_mode'] == 'live'
     assert len(requests) == 2
+    state.close(); api.close()
+
+
+def test_upload_logs_posts_drained_entries_and_clears_buffer(tmp_path):
+    from ems_device.log_buffer import CompactLogBuffer
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={'accepted': 1})
+    state = State(tmp_path)
+    api = API('https://ems.example.com', CREDS, transport=httpx.MockTransport(handler))
+    buffer = CompactLogBuffer()
+    buffer._buffer.append({'occurred_at': '2026-01-01T00:00:00+00:00', 'level': 'warning', 'code': 'x'})
+    agent = Agent(state, api, Simulator(), buffer)
+    agent.upload_logs()
+    assert len(requests) == 1
+    assert requests[0].url.path == '/api/v1/devices/logs'
+    assert json.loads(requests[0].content) == {'entries': [
+        {'occurred_at': '2026-01-01T00:00:00+00:00', 'level': 'warning', 'code': 'x'}
+    ]}
+    assert list(buffer._buffer) == []  # drained
+    state.close(); api.close()
+
+
+def test_upload_logs_noop_when_buffer_empty(tmp_path):
+    from ems_device.log_buffer import CompactLogBuffer
+    def handler(request):
+        raise AssertionError('should not make a network call for an empty buffer')
+    state = State(tmp_path)
+    api = API('https://ems.example.com', CREDS, transport=httpx.MockTransport(handler))
+    Agent(state, api, Simulator(), CompactLogBuffer()).upload_logs()
+    state.close(); api.close()
+
+
+def test_upload_logs_noop_when_no_buffer_configured(tmp_path):
+    state = State(tmp_path)
+    api = API('https://ems.example.com', CREDS, transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={})))
+    Agent(state, api, Simulator()).upload_logs()  # log_buffer=None default; must not raise
+    state.close(); api.close()
+
+
+def test_upload_logs_swallows_failure_never_raises(tmp_path):
+    from ems_device.log_buffer import CompactLogBuffer
+    state = State(tmp_path)
+    api = API('https://ems.example.com', CREDS, transport=httpx.MockTransport(
+        lambda r: httpx.Response(503, json={})))
+    buffer = CompactLogBuffer()
+    buffer._buffer.append({'occurred_at': '2026-01-01T00:00:00+00:00', 'level': 'error', 'code': 'x'})
+    Agent(state, api, Simulator(), buffer).upload_logs()  # must not raise, unlike upload()
     state.close(); api.close()
 
 

@@ -11,8 +11,10 @@ import time
 import tomllib
 import httpx
 from . import __version__
+from . import system_stats
 from .agent import Agent
 from .api import API
+from .log_buffer import CompactLogBuffer
 from .readers import DisabledReader, ModbusReader, Simulator
 from .provisioning import accept_enrollment_response, enrollment_payload
 from .state import State
@@ -54,6 +56,12 @@ def main():
     os.umask(0o077)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    # Compact WARNING+/ERROR+ buffer for the platform's per-device debug log
+    # (see log_buffer.py) -- attached to the whole logger so any log.warning/
+    # log.error call site below is captured without threading it through
+    # explicitly. Losable: never a substitute for `journalctl` on the unit.
+    log_buffer = CompactLogBuffer()
+    log.addHandler(log_buffer)
     settings = tomllib.loads(args.config.read_text())
     path = Path(settings["state_dir"])
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -73,9 +81,9 @@ def main():
             print(f"enrollment_status={state.get('enrollment_status') or 'new'}")
             return
         if args.action == "health":
-            print(json.dumps(state.health_snapshot(
-                agent_version=__version__, clock_sync=_clock_sync_status()
-            ), sort_keys=True))
+            snapshot = state.health_snapshot(agent_version=__version__, clock_sync=_clock_sync_status())
+            snapshot["system_stats"] = system_stats.collect()
+            print(json.dumps(snapshot, sort_keys=True))
             return
         if args.action == "dead-letter":
             print(json.dumps(state.dead_letters(), sort_keys=True))
@@ -197,7 +205,7 @@ def main():
         interval = settings.get("sample_seconds", 10)
         if type(interval) not in (int, float) or not 5 <= interval <= 3600:
             raise ValueError("sample_seconds must be 5..3600")
-        agent = Agent(state, api, reader)
+        agent = Agent(state, api, reader, log_buffer)
         # Fetch cloud policy before the first serial transaction. A cached policy
         # permits read-only monitoring during an outage; it never enables writes.
         try:
@@ -212,10 +220,13 @@ def main():
             if not state.get("station_config"):
                 raise
             log.warning("startup_offline: using cached policy for read-only monitoring")
-        next_sync = next_upload = 0.0
+        next_sync = next_upload = next_log_upload = 0.0
         failures = 0
         while not stop.is_set():
             now = time.monotonic()
+            if now >= next_log_upload:
+                agent.upload_logs()  # best-effort, never raises (see Agent.upload_logs)
+                next_log_upload = time.monotonic() + 60
             # Local sampling continues when cloud is offline; only network retries back off.
             if reader.telemetry_available:
                 try:
