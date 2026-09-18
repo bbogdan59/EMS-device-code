@@ -67,6 +67,22 @@ chmod 0640 "$CONFIG_FILE"
 install -m 0644 "$SCRIPT_DIR/deploy/ems-device.service" /etc/systemd/system/ems-device.service
 systemctl daemon-reload
 
+# La update, instanta existenta tine agent.lock pe toata durata procesului.
+# Oprim controlat serviciul inainte de provisioning si il repornim prin trap
+# daca orice pas ulterior esueaza, ca un update nereusit sa nu lase device-ul
+# offline. Pe o instalare noua serviciul nu este inca activ.
+SERVICE_WAS_ACTIVE=0
+if systemctl is-active --quiet ems-device; then
+    SERVICE_WAS_ACTIVE=1
+    systemctl stop ems-device
+fi
+restart_existing_service() {
+    if [ "$SERVICE_WAS_ACTIVE" -eq 1 ]; then
+        systemctl start ems-device || true
+    fi
+}
+trap restart_existing_service EXIT INT TERM
+
 echo
 echo "=== PRINT THIS LABEL AND KEEP THE DEVICE CODE SEALED ==="
 runuser -u ems-device -- "$INSTALL_DIR/current/.venv/bin/ems-device" --config "$CONFIG_FILE" provision
@@ -74,4 +90,6 @@ echo "========================================================="
 echo
 
 systemctl enable --now ems-device
+SERVICE_WAS_ACTIVE=0
+trap - EXIT INT TERM
 echo "Provisioning complete. The customer only needs power/network, RS485, and the sealed device code."

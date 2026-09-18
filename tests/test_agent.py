@@ -656,6 +656,19 @@ def _run_cli(monkeypatch, config_path, action, *args, handler=None):
     cli_module.main()
 
 
+def test_identity_diagnostic_does_not_compete_with_running_agent_lock(tmp_path, monkeypatch, capsys):
+    config_path = _write_config(tmp_path)
+    State(tmp_path / 'state').close()
+
+    def unexpected_lock(*args, **kwargs):
+        raise AssertionError("read-only identity must not request the exclusive agent lock")
+
+    monkeypatch.setattr(cli_module.fcntl, 'flock', unexpected_lock)
+    _run_cli(monkeypatch, config_path, 'identity')
+
+    assert 'serial_number=' in capsys.readouterr().out
+
+
 def test_cli_reset_requires_exact_serial_confirmation(tmp_path, monkeypatch, capsys):
     config_path = _write_config(tmp_path)
     state = State(tmp_path / 'state')
