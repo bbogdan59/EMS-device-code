@@ -2,33 +2,19 @@
 
 ## Actualizări verificate cu rollback
 
-Vezi comentariul din `deploy/update.sh` pentru mecanism. Pe scurt:
-`run.sh`/`git pull && sudo ./run.sh` face backup la instalarea anterioară
-înainte de a o înlocui; dacă noua versiune eșuează un test de fum minimal
-(`import ems_device.cli`) sau serviciul systemd nu rămâne activ după
-restart, backup-ul e restaurat automat și scriptul iese cu cod 3 -- unitatea
-continuă să ruleze ultima versiune care chiar a funcționat, în loc să rămână
-"brickuită" la mijlocul unei actualizări.
+Mecanismul canonic este `ems-device-update`, documentat în README. Manifestul
+este verificat cu cheia publică minisign fixată de operator, iar arhiva este
+verificată SHA-256 înainte de extracție. Fiecare release primește propriul
+virtualenv sub `/opt/ems-device/releases/<version>`; după testul local `health`,
+symlink-ul `/opt/ems-device/current` este schimbat atomic. Dacă serviciul nu
+devine activ după restart, updaterul reactivează release-ul anterior și îl
+repornește.
 
-**"Verificat" înseamnă testat-cu-fum + rollback automat, NU o semnătură
-criptografică.** Acest proiect nu are încă un proces stabilit de chei de
-semnare/ancoră de încredere -- a pretinde unul ar însemna inventarea unei
-infrastructuri pe care nimeni nu a cerut-o și nu o poate audita. Rămâne un
-gol real, urmărit separat, nu ascuns tăcut.
-
-`tests/test_update_rollback.sh` exercită mecanismul cu un venv real și
-instalări pip reale (fără root/apt/systemd, deci rulează și în CI) pe 4
-scenarii: instalare nouă bună, instalare nouă stricată (eșuează curat, fără
-pretenție de rollback -- nu există ce restaura), upgrade bun-spre-bun,
-upgrade bun-spre-stricat (rollback automat). Acest test a găsit și a permis
-corectarea unui bug real în timpul dezvoltării: `pip install --upgrade`
-dintr-un director local, cu numărul de versiune neschimbat, poate rămâne cu
-un `build/lib/` cache neactualizat din instalarea anterioară -- deoarece
-`cp -a`/`mv` păstrează timestamp-urile fișierelor, un fișier RESTAURAT (mai
-vechi ca timestamp) poate părea "nu mai nou" pentru build-ul incremental
-distutils, care atunci reutilizează cache-ul învechit în loc să recompileze.
-Corectat prin `rm -rf build/` + `--force-reinstall --no-cache-dir` la
-fiecare instalare/rollback.
+`tests/test_updater.py` acoperă verificarea/activarea, rollback-ul la eșecul
+systemd și respingerea traversal-ului din arhivă. Testele folosesc mock-uri și
+nu înlocuiesc o întrerupere fizică de alimentare pe Pi. `git pull && sudo
+./run.sh` rămâne numai fluxul manual de bootstrap/dezvoltare, nu canalul de
+update pentru producție.
 
 ## Buget de resurse (măsurat, dar NU pe Raspberry Pi)
 

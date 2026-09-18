@@ -5,7 +5,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .provisioning import new_identity
+from .provisioning import new_activation_code, new_identity
 
 
 class State:
@@ -75,6 +75,36 @@ class State:
         if activation_code is not None:
             identity["activation_code"] = activation_code
         return identity
+
+    def clear_assignment(self):
+        """Release the current station/platform binding without changing the
+        physical device's identity (issue #3: transfer, reprovisioning to a
+        different platform URL). There is no device-callable revoke/transfer
+        endpoint -- the server only ever pushes this via a 401 on the NEXT
+        authenticated call, so an operator runs this explicitly once they
+        intend to move the unit, then lets the existing enroll/pending loop
+        re-run against the new station/platform. The previous activation
+        code is one-use and may already be consumed or compromised, so a
+        fresh one is issued; the installation UUID/serial/provisioning
+        secret -- this unit's actual identity -- are untouched."""
+        self.set("credentials", None)
+        self.set("enrollment_status", None)
+        self.set("platform_origin", None)
+        self.set("credential_rotation_pending", False)
+        self.set("activation_code", new_activation_code())
+
+    def factory_reset(self):
+        """Full reprovisioning for hardware being repurposed for a different
+        customer/operator (issue #3): wipe the queue and every local secret,
+        then issue an ENTIRELY NEW device identity so nothing from the
+        previous installation is reusable -- same intent as never shipping a
+        shared secret in the OS image, applied to an already-installed unit."""
+        with self.db:
+            self.db.execute("DELETE FROM outbox")
+            self.db.execute("DELETE FROM dead_letter")
+            self.db.execute("DELETE FROM settings")
+        self._ensure_identity()
+        self._secure_database_files()
 
     def get(self, key):
         row = self.db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
@@ -167,6 +197,14 @@ class State:
                 "storage_bytes": sum(path.stat().st_size for path in files if path.exists()),
             },
             "dead_letter_count": dead_letter_count,
+            "enrollment_status": self.get("enrollment_status"),
+            # True only while a rotate-credential call's outcome is unknown
+            # (request sent, response never confirmed -- network drop, crash,
+            # etc.). The agent cannot tell "rotation succeeded server-side"
+            # apart from "never reached the server" from a 401 alone; this
+            # flag makes that ambiguity visible instead of silent. Recovery
+            # is the same `reset` used for revoke/transfer/factory-reset.
+            "credential_rotation_pending": bool(self.get("credential_rotation_pending")),
             **self._health(),
         }
 

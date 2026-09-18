@@ -12,7 +12,7 @@ Primul subset funcțional al controllerului local Python pentru EMS. **v0.1 este
 - Simulator explicit și transport Modbus RTU RS485 read-only bazat pe profil local auditat.
 - Serviciu systemd, oprire SIGTERM/SIGINT și teste fără hardware.
 
-**Nu este inclusă o hartă DEYE validată.** Modelul și firmware-ul nu au fost specificate. Exemplul din `profiles/` este intenționat nevalidat și nu poate porni citirea. Nu copia registre de la altă familie DEYE. Marcarea `verified=true` este o atestare a operatorului, nu autodetecție sau certificare realizată de software.
+**Nu este inclusă o hartă DEYE validată pe hardware real.** `profiles/schema-example.json` rămâne intenționat gol/nevalidat. `profiles/deye_sg04lp3_candidate.json` (issue #1) adaugă un candidat mult mai complet pentru familia Deye SUN-*K-SG04LP3-EU (5/6/8/10/12K, inclusiv varianta 10K) -- adrese/encodări/scale transcrise dintr-o sursă comunitară citată explicit (nu documentația oficială, blocată de rețea în acest mediu), dar **livrat tot cu `verified: false`**: nimeni nu l-a citit de pe un invertor real în această sesiune. Vezi `docs/VALIDATION_SG04LP3.md` pentru exact ce rămâne de confirmat (în special sensul puterii/curentului de baterie) înainte ca un operator să îl comute pe `verified: true`. Nu copia registre de la altă familie DEYE. Marcarea `verified=true` este o atestare a operatorului, nu autodetecție sau certificare realizată de software.
 
 ## OS și hardware
 
@@ -45,12 +45,38 @@ configurația inițială și serviciul systemd. Identitatea este creată în
 Configurația sigură implicită este `reader="disabled"`: device-ul se poate
 înregistra și trimite heartbeat, dar nu pretinde că citește invertorul. Trecerea
 la `modbus` se face numai după instalarea unui profil validat pentru modelul și
-firmware-ul DEYE exact. Pentru update: `git pull && sudo ./run.sh`; fișierul de
-config și identitatea existentă sunt păstrate.
+firmware-ul DEYE exact. `git pull && sudo ./run.sh` este doar fluxul manual de
+bootstrap/dezvoltare; fișierul de config și identitatea existentă sunt păstrate.
+
+### Update verificat și rollback
+
+Producția trebuie să publice un `manifest.json` cu exact câmpurile `version`,
+`url` (arhivă `.tar.gz` HTTPS) și `sha256`, plus semnătura detached
+`manifest.json.minisig`. Cheia privată nu ajunge pe device. Operatorul fixează
+cheia publică minisign dintr-un canal separat și rulează, ca root:
+
+```sh
+/opt/ems-device/current/.venv/bin/ems-device-update \
+  --public-key 'RW...' https://updates.example.com/stable/manifest.json
+```
+
+Updaterul refuză HTTP, redirect-uri, manifesturi cu alte câmpuri, hash-uri
+greșite și arhive cu traversal/link-uri. Instalează într-un director nou,
+construiește un virtualenv izolat, execută `health`, apoi schimbă atomic symlink-ul
+`/opt/ems-device/current`. Dacă serviciul nu devine activ, restaurează release-ul
+anterior și îl repornește. Descărcarea periodică nu este activată implicit:
+fereastra de mentenanță și politica de rollout rămân decizia operatorului.
 
 Nu clona `/var/lib/ems-device`: conține secretul unic al unității. O imagine OS
 de producție trebuie să lase acel director gol, astfel încât fiecare unitate să
 primească altă identitate la provisioning.
+
+**Alternativ, de pe laptopul tehnicianului, fără SSH manual pe Pi**: vezi
+[configurator/README.md](configurator/README.md) -- un script care se conectează
+prin SSH la Pi (IP autodetectat sau introdus manual, user/parolă), copiază acest
+checkout și rulează `sudo ./run.sh` acolo, relantand seria/Device Code-ul direct
+in terminalul local. Nu reimplementeaza nimic din `run.sh`; e doar un wrapper
+peste exact fluxul manual de mai sus.
 
 ### 2. Client: instalarea acasă
 
@@ -89,17 +115,53 @@ incomplet, cu identitate greșită sau cu totaluri contradictorii nu modifică
 deloc coada. Agentul rămâne compatibil cu serverele vechi: fără `results`,
 șterge batch-ul numai la succes agregat integral.
 
+### Transfer, revocare, factory reset (issue #3)
+
+Nicio revocare/transfer/factory-reset declanșat din admin-ul web nu ajunge
+direct la device -- singurul semnal e un `401`/`403` la următorul apel
+autentificat (`journalctl` arată tipul `CredentialInactiveError`, niciodată
+textul răspunsului). Recuperarea e mereu manuală, cerută explicit de
+operator, niciodată automată:
+
+```sh
+# elibereaza asocierea curenta (transfer catre alta statie/platforma);
+# identitatea fizica (serial/UUID) ramane neschimbata, un Device Code nou e emis
+sudo -u ems-device /opt/ems-device/.venv/bin/ems-device --config /etc/ems-device/config.toml \
+  reset --confirm-serial EMS-XXXX-XXXX-XXXX
+
+# reprovizionare completa (hardware repus in circuit pentru alt client):
+# emite o identitate noua in intregime, sterge coada/dead-letter locale
+sudo -u ems-device /opt/ems-device/.venv/bin/ems-device --config /etc/ems-device/config.toml \
+  reset --factory --confirm-serial EMS-XXXX-XXXX-XXXX
+```
+
+`--confirm-serial` trebuie să fie EXACT serialul afișat de `identity` -- fără
+potrivire exactă, comanda refuză și nu schimbă nimic. După `reset`, urmatorul
+`provision`/`run` reia enrollment-ul automat (eventual către un `platform_url`
+nou din `config.toml`, acum că `platform_origin` local a fost eliberat).
+
+`rotate-credential` cere platformei un secret nou pentru identitatea deja
+alocată (`POST /devices/credentials/rotate`, autentificat cu secretul curent).
+Marchează local o rotație "in curs" ÎNAINTE de cererea de rețea, ca un răspuns
+pierdut (crash, retea cazuta) să rămână vizibil (`health` →
+`credential_rotation_pending: true`) în loc să dispară tăcut -- agentul nu
+poate distinge singur "rotația a reușit dar am pierdut răspunsul" de "a fost
+efectiv revocat", așa că nu reîncearcă orbește; recuperarea folosește tot
+`reset`.
+
 ## Dezvoltare
 
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -e '.[test]'
 .venv/bin/pytest -q
-sh -n run.sh deploy/update.sh
-sh tests/test_update_rollback.sh
 ```
 
-CI verifică Python 3.11 și 3.13. Testele MockTransport și Modbus fake nu reprezintă validare pe Pi/invertor sau integrare cu un server web real. `tests/test_update_rollback.sh` exercită separat mecanismul de actualizare/rollback (issue #4) cu un venv real, fără root/systemd -- vezi [docs/OPERATIONS.md](docs/OPERATIONS.md).
+CI verifică Python 3.11 și 3.13. Testele MockTransport, Modbus fake și updater
+mock nu reprezintă validare pe Pi/invertor, power-cut sau integrare cu un server
+web real. Rollback-ul testat local acoperă eșecul verificării systemd, nu o
+întrerupere fizică în timpul schimbării release-ului. Bugetele măsurate și
+limitele validării sunt documentate în [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 ## Limite și contracte
 

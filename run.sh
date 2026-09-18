@@ -21,7 +21,7 @@ if [ -z "$PLATFORM_URL" ] && [ ! -f "$CONFIG_FILE" ]; then
 fi
 
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git python3 python3-venv
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git minisign python3 python3-venv
 
 if ! id ems-device >/dev/null 2>&1; then
     useradd --system --user-group --home-dir "$STATE_DIR" --create-home ems-device
@@ -30,13 +30,17 @@ usermod -aG dialout ems-device
 install -d -m 0755 "$INSTALL_DIR" "$CONFIG_DIR"
 install -d -m 0700 -o ems-device -g ems-device "$STATE_DIR"
 
-# Copy only runtime sources. Identity is created in STATE_DIR and is never
-# part of this checkout, so cloning/flashing the OS cannot clone credentials.
-# See deploy/update.sh (issue #4) for the verified-update-with-rollback
-# logic this sources: it leaves UPGRADE=0|1 and a _rollback_update function
-# in scope here, and exits (aborting this whole script) on a failed smoke
-# test with nothing left to roll back to.
-. "$SCRIPT_DIR/deploy/update.sh"
+# Bootstrap uses the same release/symlink layout as signed updates. Identity is
+# kept separately in STATE_DIR and can never be included in a release bundle.
+BOOTSTRAP="$INSTALL_DIR/releases/bootstrap"
+install -d -m 0755 "$INSTALL_DIR/releases" "$BOOTSTRAP"
+rm -rf "$BOOTSTRAP/src"
+cp -a "$SCRIPT_DIR/src" "$BOOTSTRAP/src"
+install -m 0644 "$SCRIPT_DIR/pyproject.toml" "$BOOTSTRAP/pyproject.toml"
+python3 -m venv "$BOOTSTRAP/.venv"
+"$BOOTSTRAP/.venv/bin/pip" install --disable-pip-version-check "$BOOTSTRAP"
+ln -sfn "$BOOTSTRAP" "$INSTALL_DIR/.current.new"
+mv -Tf "$INSTALL_DIR/.current.new" "$INSTALL_DIR/current"
 
 if [ ! -f "$CONFIG_FILE" ]; then
     cat >"$CONFIG_FILE" <<EOF
@@ -65,7 +69,7 @@ systemctl daemon-reload
 
 echo
 echo "=== PRINT THIS LABEL AND KEEP THE DEVICE CODE SEALED ==="
-runuser -u ems-device -- "$INSTALL_DIR/.venv/bin/ems-device" --config "$CONFIG_FILE" provision
+runuser -u ems-device -- "$INSTALL_DIR/current/.venv/bin/ems-device" --config "$CONFIG_FILE" provision
 echo "========================================================="
 echo
 

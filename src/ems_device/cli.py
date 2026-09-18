@@ -20,6 +20,13 @@ from .state import State
 log = logging.getLogger("ems_device")
 
 
+class CredentialInactiveError(Exception):
+    """Distinct type so `type(exc).__name__` alone (the only thing logged --
+    see the security note by the outer handler) is enough for an operator to
+    grep journalctl and find docs/PROTOCOL.md's recovery steps, without the
+    log ever needing to carry exception text/response bodies."""
+
+
 def _clock_sync_status(marker=Path("/run/systemd/timesync/synchronized")):
     """Conservator: absenta markerului nu este echivalenta cu ceas nesincronizat."""
     return "synchronized" if marker.exists() else "unknown"
@@ -35,8 +42,14 @@ def _retry_delay(response, failures):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("action", choices=["dead-letter", "health", "identity", "provision", "run"])
+    parser.add_argument(
+        "action", choices=["dead-letter", "health", "identity", "provision", "reset", "rotate-credential", "run"]
+    )
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--factory", action="store_true",
+                        help="with 'reset': also issue a brand new device identity (repurposing hardware)")
+    parser.add_argument("--confirm-serial",
+                        help="required for 'reset': must exactly match the serial printed by 'identity'")
     args = parser.parse_args()
     os.umask(0o077)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -67,10 +80,56 @@ def main():
         if args.action == "dead-letter":
             print(json.dumps(state.dead_letters(), sort_keys=True))
             return
+        if args.action == "reset":
+            # Purely local: no server-initiated revoke/transfer/factory-reset
+            # ever reaches the device directly, only a 401 on its NEXT
+            # authenticated call. This is the operator's explicit recovery
+            # action after that 401, after a transfer, or before repurposing
+            # hardware for a different customer -- never triggered
+            # automatically. See docs/PROTOCOL.md.
+            identity = state.identity()
+            if args.confirm_serial != identity["serial_number"]:
+                raise SystemExit(
+                    "Refused: --confirm-serial must exactly match the serial printed by 'identity' "
+                    f"({identity['serial_number']!r}). This releases the current station assignment"
+                    + (" and issues a brand new device identity." if args.factory else ".")
+                )
+            if args.factory:
+                state.factory_reset()
+                identity = state.identity()
+                print(f"Factory reset complete. New serial: {identity['serial_number']}")
+            else:
+                state.clear_assignment()
+                identity = state.identity()
+                print(f"Assignment cleared. Serial unchanged: {identity['serial_number']}")
+            print(f"New device code (keep sealed until next setup): {identity['activation_code']}")
+            return
         api = API(settings["platform_url"], state.get("credentials"))
         bound_origin = state.get("platform_origin")
         if bound_origin and bound_origin != api.origin:
             raise ValueError("State is bound to another platform; credentials will not be sent")
+        if args.action == "rotate-credential":
+            if not state.get("credentials"):
+                raise SystemExit("No active credentials to rotate; enroll first")
+            # Set BEFORE the network call: if the response never arrives (crash,
+            # network drop after the server already processed it), this flag
+            # survives to the next run/health check instead of silently
+            # vanishing with the failed request.
+            state.set("credential_rotation_pending", True)
+            response = api.rotate_credential()
+            new_secret = response.get("credential_secret")
+            if not isinstance(new_secret, str) or not new_secret:
+                raise SystemExit(
+                    "Rotation response missing credential_secret; treating as failed. "
+                    "Do not retry blindly -- check 'ems-device health' (credential_rotation_pending) "
+                    "and if heartbeats start failing with 401, run 'ems-device reset'."
+                )
+            credentials = dict(state.get("credentials"))
+            credentials["credential_secret"] = new_secret
+            state.set("credentials", credentials)
+            state.set("credential_rotation_pending", False)
+            print("Credential rotated.")
+            return
         if args.action == "provision":
             identity = state.identity()
             state.set("platform_origin", api.origin)
@@ -130,6 +189,9 @@ def main():
             reader = Simulator()
         elif mode == "modbus":
             reader = ModbusReader(settings["modbus"])
+            # O singura citire de verificare, inainte de bucla periodica --
+            # refuza devreme un profil incompatibil (vezi ModbusReader.check_ready).
+            reader.check_ready()
         else:
             raise ValueError("reader must be disabled, simulator or modbus")
         interval = settings.get("sample_seconds", 10)
@@ -141,7 +203,9 @@ def main():
         try:
             agent.sync()
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code in (401, 403) or not state.get("station_config"):
+            if exc.response.status_code in (401, 403):
+                raise CredentialInactiveError("credential_inactive") from None
+            if not state.get("station_config"):
                 raise
             log.warning("startup_offline: using cached policy for read-only monitoring")
         except Exception:
@@ -168,7 +232,13 @@ def main():
                     next_upload = time.monotonic() + interval
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code in (401, 403):
-                        raise ValueError("Credential inactive: operator action required") from None
+                        # Server-side revoke/transfer/factory-reset never reaches this
+                        # device directly -- this 401/403 is the only signal. Recovery
+                        # is `ems-device reset` (see docs/PROTOCOL.md "Recuperare dupa
+                        # revocare/transfer"). The outer handler only ever logs the
+                        # exception TYPE name, never its message (no token/response
+                        # body in logs) -- so the guidance lives in docs, not here.
+                        raise CredentialInactiveError("credential_inactive") from None
                     failures += 1
                     next_upload = time.monotonic() + min(300, 2 ** min(failures, 8)) + random.random()
                     log.warning("cloud_http_error status=%s", exc.response.status_code)

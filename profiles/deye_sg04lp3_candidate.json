@@ -1,0 +1,83 @@
+{
+  "verified": false,
+  "model": "Deye SUN-*K-SG04LP3-EU hybrid inverter family (5K/6K/8K/10K/12K share one Modbus map per the cited source; includes the 10K variant)",
+  "firmware": "Not confirmed to an exact firmware build in this session -- matches the register layout documented for the SG04LP3 family by the source below as of its cited snapshot. Confirm against the exact unit's firmware before flipping verified=true.",
+  "source": "Register addresses/encodings/scales transcribed from kbialek/deye-inverter-mqtt (Apache-2.0) commit 6762eaa5927f1aefc060eef090c54bf60fcaab9d (2026-09-06): docs/metric_group_deye_sg04lp3.md, docs/metric_group_deye_sg04lp3_battery.md, docs/metric_group_deye_sg04lp3_ups.md, src/deye_sensors_deye_sg04lp3.py. Model family cross-checked against the manufacturer product page https://deye.com/product/sun-5-6-8-10-12k-sg04lp3-eu/. NOT independently read back against real hardware in this session -- see docs/VALIDATION_SG04LP3.md for exactly what remains unconfirmed (battery/current sign direction, the signed+offset temperature encoding, readiness-check codes) before any operator sets verified=true.",
+  "modbus_serial_reference": {
+    "baudrate": 9600,
+    "parity": "N",
+    "stopbits": 1,
+    "note": "Per the cited source's documented defaults for this protocol family; confirm against the unit's own manual/DIP switches, never assumed by the agent."
+  },
+  "points": [
+    {"field": "inverter_status_code", "address": 500, "function": 3, "encoding": "u16", "scale": 1},
+
+    {"field": "battery_charge_energy_total_kwh", "address": 516, "function": 3, "encoding": "u32", "word_order": "low_high", "scale": 0.1},
+    {"field": "battery_discharge_energy_total_kwh", "address": 518, "function": 3, "encoding": "u32", "word_order": "low_high", "scale": 0.1},
+
+    {"field": "grid_import_energy_total_kwh", "address": 522, "function": 3, "encoding": "u32", "word_order": "low_high", "scale": 0.1},
+    {"field": "grid_export_energy_total_kwh", "address": 524, "function": 3, "encoding": "u32", "word_order": "low_high", "scale": 0.1},
+
+    {"field": "load_energy_total_kwh", "address": 527, "function": 3, "encoding": "u32", "word_order": "low_high", "scale": 0.1},
+
+    {"field": "pv_energy_total_kwh", "address": 534, "function": 3, "encoding": "u32", "word_order": "low_high", "scale": 0.1},
+
+    {"field": "dc_temperature_c", "address": 540, "function": 3, "encoding": "s16", "scale": 0.1, "offset": -100.0},
+    {"field": "ac_temperature_c", "address": 541, "function": 3, "encoding": "s16", "scale": 0.1, "offset": -100.0},
+
+    {"field": "battery_temperature_c", "address": 586, "function": 3, "encoding": "u16", "scale": 0.1, "offset": -100.0},
+    {"field": "battery_voltage_v", "address": 587, "function": 3, "encoding": "u16", "scale": 0.01},
+    {"field": "battery_soc_percent", "address": 588, "function": 3, "encoding": "u16", "scale": 1},
+    {"field": "battery_power_w", "address": 590, "function": 3, "encoding": "s16", "scale": -1},
+    {"field": "battery_current_a", "address": 591, "function": 3, "encoding": "s16", "scale": -0.01},
+
+    {"field": "grid_voltage_l1_v", "address": 598, "function": 3, "encoding": "u16", "scale": 0.1},
+    {"field": "grid_voltage_l2_v", "address": 599, "function": 3, "encoding": "u16", "scale": 0.1},
+    {"field": "grid_voltage_l3_v", "address": 600, "function": 3, "encoding": "u16", "scale": 0.1},
+    {"field": "grid_ct_l1_w", "address": 604, "function": 3, "encoding": "s16", "scale": 1},
+    {"field": "grid_ct_l2_w", "address": 605, "function": 3, "encoding": "s16", "scale": 1},
+    {"field": "grid_ct_l3_w", "address": 606, "function": 3, "encoding": "s16", "scale": 1},
+
+    {"field": "grid_power_w", "address": 625, "function": 3, "encoding": "s16", "scale": 1},
+
+    {"field": "load_voltage_l1_v", "address": 644, "function": 3, "encoding": "u16", "scale": 0.1},
+    {"field": "load_voltage_l2_v", "address": 645, "function": 3, "encoding": "u16", "scale": 0.1},
+    {"field": "load_voltage_l3_v", "address": 646, "function": 3, "encoding": "u16", "scale": 0.1},
+    {"field": "load_power_l1_w", "address": 650, "function": 3, "encoding": "u16", "scale": 1},
+    {"field": "load_power_l2_w", "address": 651, "function": 3, "encoding": "u16", "scale": 1},
+    {"field": "load_power_l3_w", "address": 652, "function": 3, "encoding": "u16", "scale": 1},
+    {"field": "load_power_w", "address": 653, "function": 3, "encoding": "u16", "scale": 1},
+
+    {"field": "pv1_power_w", "address": 672, "function": 3, "encoding": "u16", "scale": 1},
+    {"field": "pv2_power_w", "address": 673, "function": 3, "encoding": "u16", "scale": 1},
+    {"field": "pv1_voltage_v", "address": 676, "function": 3, "encoding": "u16", "scale": 0.1},
+    {"field": "pv1_current_a", "address": 677, "function": 3, "encoding": "u16", "scale": 0.1},
+    {"field": "pv2_voltage_v", "address": 678, "function": 3, "encoding": "u16", "scale": 0.1},
+    {"field": "pv2_current_a", "address": 679, "function": 3, "encoding": "u16", "scale": 0.1}
+  ],
+  "computed": [
+    {"field": "pv_power_w", "sum_of": ["pv1_power_w", "pv2_power_w"]}
+  ],
+  "blocks": [
+    {"function": 3, "start": 500, "length": 1},
+    {"function": 3, "start": 516, "length": 4},
+    {"function": 3, "start": 522, "length": 4},
+    {"function": 3, "start": 527, "length": 2},
+    {"function": 3, "start": 534, "length": 2},
+    {"function": 3, "start": 540, "length": 2},
+    {"function": 3, "start": 586, "length": 3},
+    {"function": 3, "start": 590, "length": 2},
+    {"function": 3, "start": 598, "length": 3},
+    {"function": 3, "start": 604, "length": 3},
+    {"function": 3, "start": 625, "length": 1},
+    {"function": 3, "start": 644, "length": 3},
+    {"function": 3, "start": 650, "length": 4},
+    {"function": 3, "start": 672, "length": 2},
+    {"function": 3, "start": 676, "length": 4}
+  ],
+  "readiness_check": {
+    "field": "inverter_status_code",
+    "allowed_values": [0, 1, 2, 3, 4],
+    "note": "0=standby 1=selfcheck 2=normal 3=alarm 4=fault per the cited source's enum -- any of the five confirms a real SG04LP3-family inverter answered, not a scan/guess."
+  }
+}

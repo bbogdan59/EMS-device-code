@@ -10,6 +10,7 @@ Contract inspectat în `bbogdan59/EMS-management-platform`, baza inițială `d14
 | Configurație | GET /api/v1/config | cache config_version/preference_version; nu confirmă aplicarea în invertor |
 | Prezență | POST /api/v1/devices/heartbeat | boot_id, firmware_version agent, telemetry=true, inverter_write=false |
 | Telemetrie | POST /api/v1/telemetry/batch | ACK per item: șterge accepted/duplicate, păstrează retryable, mută permanent în dead-letter; fallback sigur la răspunsul agregat vechi |
+| Rotație credential | POST /api/v1/devices/credentials/rotate | issue #3: autentificat cu secretul CURENT; serverul revocă imediat vechiul secret și întoarce unul nou o singură dată (`api.rotate_credential`, CLI `rotate-credential`) |
 
 Înainte de assignment, dovada device-ului este `provisioning_secret`, generat și
 păstrat local. După assignment, autentificarea este `Authorization: Bearer
@@ -45,12 +46,21 @@ copiată și ștearsă atomic în SQLite, apoi poate fi inspectată local cu
 
 PyModbus 3.11.3, [API oficial](https://pymodbus.readthedocs.io/en/v3.11.3/source/client.html). Un singur apel serial la un moment dat. Profil JSON cu `verified`, model exact, firmware validat, sursă/revizie protocol și `points`. Fiecare punct are:
 
-- `field`: unul dintre cele cinci câmpuri de mai sus, fără duplicate;
-- `address`: adresă PDU zero-based confirmată, 0..65535;
+- `field`: unul dintre câmpurile din `ems_device.readers.FIELDS` (cele cinci originale plus extensiile issue #1: PV per string, rețea/load per fază, temperaturi, status brut, contoare cumulative), fără duplicate;
+- `address`: adresă PDU zero-based confirmată, 0..65535 -- pentru puncte pe 32 de biți, adresa este primul din cele două registre adiacente;
 - `function`: numai 3 holding / 4 input;
-- `encoding`: numai u16/s16; `scale`: multiplicator către W sau %, inclusiv inversarea semnului dacă protocolul o cere.
+- `encoding`: u16/s16/u32/s32; punctele pe 32 de biți cer `word_order` (`low_high` -- registrul de la `address` e cuvântul jos, convenția obișnuită Deye pentru contoare -- sau `high_low`);
+- `scale`: multiplicator către W/V/A/°C/% sau %, inclusiv inversarea semnului dacă protocolul o cere; `offset` (opțional, implicit 0) se adună DUPĂ scalare -- necesar pentru convenția Deye de temperatură (`raw*scale - 100`).
 
-Nu există adrese demonstrative care ar putea fi confundate cu registre DEYE reale. Profilul minim are 1..32 puncte. 32-bit, word-order, sentinele de indisponibilitate, identitate invertor, gruparea blocurilor și detectarea modelului sunt în backlog. Un profil local greșit poate produce valori plauzibile: validarea hardware rămâne obligatorie.
+Opțional, profilul poate declara:
+
+- `blocks`: listă de `{function, start, length}` -- registre citite într-un singur apel Modbus în loc de unul per punct. Fiecare bloc trebuie să acopere STRICT adrese deja documentate de puncte (nicio "traversare" a unei zone nedocumentate doar ca să unească două puncte apropiate); blocurile nu se pot suprapune; lungimea e limitată la `MAX_BLOCK_REGISTERS=60` (sub limita Modbus de 125, ca să reducă riscul unui cadru RS485 lung pe o magistrală/adaptor zgomotos). Fără `blocks`, comportamentul rămâne cel din v0.1 (un apel per punct).
+- `computed`: câmpuri derivate ca sumă a altor puncte deja citite (ex. `pv_power_w` = `pv1_power_w` + `pv2_power_w`, pentru că Deye SG04LP3 nu expune un registru unic de putere PV totală). Fiecare termen din `sum_of` trebuie să fie un punct deja definit.
+- `readiness_check`: `{field, allowed_values}` -- citit O SINGURĂ DATĂ, înainte de bucla periodică de eșantionare (`ModbusReader.check_ready()`, apelat din `cli.py` imediat după construirea reader-ului), ca să refuze devreme un profil incompatibil. Nu este o scanare de adrese/baudrate -- doar o citire a unui registru deja declarat ca punct, comparată cu valorile așteptate documentate.
+
+Nu există adrese demonstrative care ar putea fi confundate cu registre DEYE reale. Profilul minim are 1..64 puncte. Sentinelele de indisponibilitate rămân în backlog (niciun profil livrat cu acest repo nu documentează încă unul confirmat -- vezi `docs/VALIDATION_SG04LP3.md`). Un profil local greșit poate produce valori plauzibile: validarea hardware rămâne obligatorie, iar `verified: true` este o atestare a operatorului dupa acea validare, niciodata a codului/agentului.
+
+Primul profil candidat cu extensiile de mai sus, `profiles/deye_sg04lp3_candidate.json` (Deye SUN-*K-SG04LP3-EU, familia care include varianta 10K), este livrat cu `verified: false` -- sursa exactă și lista completă a ce rămâne de confirmat pe hardware real sunt în `docs/VALIDATION_SG04LP3.md`.
 
 ## Flux de instalare și stadiu
 
@@ -66,8 +76,62 @@ Nu există adrese demonstrative care ar putea fi confundate cu registre DEYE rea
    până la disponibilitatea unui profil DEYE validat.
 
 Pașii 1, 2, 4 și modul sigur sunt implementați în agent. Claim-ul self-service
-din pasul 3 este contractul comun cu `EMS-management-platform#44`. Transferul,
-revocarea/factory reset, identificarea DEYE și desired/reported complet rămân
-work items separate.
+din pasul 3 este contractul comun cu `EMS-management-platform#44`. Identificarea
+DEYE (issue #1) și desired/reported complet rămân work items separate.
+
+## Recuperare după revocare/transfer/factory-reset (issue #3)
+
+`EMS-management-platform` are UI de admin pentru revoke/transfer/factory-reset
+(`device_service.revoke_device`/`transfer_device`/`factory_reset_device`), dar
+NICIUNA dintre aceste acțiuni are un canal push către device -- agentul nu are
+niciun endpoint de tip "notificare". Singurul semnal pe care device-ul îl
+poate observa este un `401`/`403` la următorul `heartbeat`/`config`/`telemetry`,
+pentru că serverul a revocat deja credentialul curent.
+
+Recuperarea e deliberat MANUALĂ, niciodată automată (un 401 tranzitoriu -- bug
+server, ceas nesincronizat -- nu trebuie să distrugă o asociere încă validă):
+
+- Agentul se oprește (`CredentialInactiveError`, `SystemExit(1)`); systemd îl
+  repornește, dar bucla de enrollment (`while not state.get("credentials")`)
+  NU se reactivează singură cât timp `credentials` locale există, chiar dacă
+  serverul le-a revocat -- fără intervenție ar rezulta o buclă de crash
+  infinită cu un credential mereu invalid.
+- Operatorul rulează `ems-device ... reset --confirm-serial <serial>`
+  (`State.clear_assignment`): șterge `credentials`/`enrollment_status`/
+  `platform_origin` local, emite un Device Code nou (cel vechi e deja
+  consumat/compromis), PĂSTREAZĂ `installation_uuid`/`serial_number`/
+  `provisioning_secret` -- aceeași unitate fizică, gata de re-enrollment către
+  o stație (sau chiar un `platform_url`) nou.
+- `reset --factory` (`State.factory_reset`) e pentru hardware repus în
+  circuit pentru alt client: șterge și coada/dead-letter locale și emite o
+  identitate COMPLET nouă -- nimic din instalarea anterioară nu mai e
+  reutilizabil, simetric cu regula "nicio identitate în imaginea OS".
+- Ambele cer `--confirm-serial` EXACT egal cu serialul curent (`identity`) --
+  fără potrivire, comanda refuză și nu schimbă nimic local.
+
+`accept_enrollment_response` respinge explicit (`assignment_identity_mismatch`)
+un răspuns "assigned" pentru un device/station DIFERIT de cel deja persistat
+local, ca plasă de siguranță suplimentară față de un race/replay ("două
+conturi" din criteriile de acceptare) -- deși în fluxul normal acest cod nu e
+niciodată atins din nou după ce `credentials` există (nici `run`, nici
+`provision` nu re-apelează `enroll()` în acel caz).
+
+Rotația de credential (`rotate-credential`) marchează local
+`credential_rotation_pending=true` ÎNAINTE de cererea de rețea; dacă răspunsul
+se pierde, agentul NU poate distinge "rotația a reușit server-side dar am
+pierdut confirmarea" de "a fost efectiv revocat" -- deci nu reîncearcă orbește
+cu vechiul secret. Flag-ul rămâne vizibil în `health` până la următoarea
+rotație reușită sau un `reset`, care rezolvă oricare din cele două posibilități
+uniform.
+
+## Distribuirea release-urilor
+
+Release-urile nu conțin `/var/lib/ems-device` și sunt instalate sub
+`/opt/ems-device/releases/<version>`. Un manifest minisign verificat leagă
+versiunea de URL-ul HTTPS și SHA-256-ul arhivei. Activarea schimbă atomic
+`/opt/ems-device/current`; serviciul systemd folosește exclusiv acel symlink.
+Un restart urmat de `systemctl is-active` nereușit reactivează release-ul
+anterior. Cheia publică este furnizată explicit operatorului și nu este
+descărcată din același canal cu update-ul.
 
 Nu promite controlul tuturor parametrilor sau aplicare instantanee. Registrele de protecție a rețelei și parametrii instalatorului necesită o politică distinctă. La pierderea cloud-ului, acest subset nu modifică regimul invertorului.
