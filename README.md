@@ -6,7 +6,8 @@ Primul subset funcțional al controllerului local Python pentru EMS. **v0.1 este
 
 - Identitate unică generată după instalarea OS: UUID intern, serial public, cod de activare pentru client și secret de provisioning local.
 - Enrollment automat idempotent, stare pending și polling până când clientul asociază device-ul; nu mai este necesar codul temporar de 15 minute în CLI.
-- Citire periodică `/api/v1/config`, cache local și heartbeat cu capabilități reale.
+- Citire periodică `/api/v1/config`, cache local și heartbeat cu capabilități reale și instantaneu de resurse locale (CPU/memorie/temperatură/disk, `system_stats.py`) -- valori necunoscute omise, niciodată 0 inventat.
+- Jurnal compact de debug (`log_buffer.py`): linii WARNING+/ERROR+ trimise best-effort la `POST /api/v1/devices/logs` (fără stack trace/payload), pentru vizibilitate live pe pagina de configurare a device-ului; pierdut la o întrerupere de rețea, nu retrimis, spre deosebire de telemetrie.
 - Telemetrie PV, consum, grid, putere baterie și SOC; valori necunoscute omise, fără zero inventat.
 - Outbox SQLite persistent, batch-uri de 50, retry cu backoff, identificatori stabili pentru deduplicare după timeout/restart.
 - Simulator explicit și transport Modbus RTU RS485 read-only bazat pe profil local auditat.

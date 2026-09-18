@@ -2,15 +2,16 @@ import logging
 import math
 import uuid
 from datetime import datetime, timezone
-from . import __version__
+from . import __version__, system_stats
 from .readers import FIELDS, SIGNED_FIELDS
 
 log = logging.getLogger(__name__)
 
 
 class Agent:
-    def __init__(self, state, api, reader):
+    def __init__(self, state, api, reader, log_buffer=None):
         self.state, self.api, self.reader = state, api, reader
+        self.log_buffer = log_buffer
         self.boot_id = str(uuid.uuid4())  # new process, persistent queued items retain old boot IDs
         self.sequence = 0
 
@@ -41,7 +42,8 @@ class Agent:
             self.api.call("POST", "/devices/heartbeat", {
                 "boot_id": self.boot_id, "firmware_version": __version__,
                 "capabilities": {"telemetry": self.reader.telemetry_available, "inverter_write": False,
-                                 "simulated": self.reader.simulated}})
+                                 "simulated": self.reader.simulated},
+                "system_stats": system_stats.collect()})
             self._record_success("config")
         except Exception as exc:
             self._record_error("config", exc)
@@ -95,6 +97,20 @@ class Agent:
         except Exception as exc:
             self._record_error("upload", exc)
             raise
+
+    def upload_logs(self):
+        """Best-effort: unlike upload(), a failure here is swallowed, not
+        raised -- the debug log is losable (see log_buffer.py), never worth
+        tripping the telemetry backoff/CredentialInactiveError machinery."""
+        if self.log_buffer is None:
+            return
+        entries = self.log_buffer.drain()
+        if not entries:
+            return
+        try:
+            self.api.call("POST", "/devices/logs", {"entries": entries})
+        except Exception as exc:
+            log.warning("log_upload_failed type=%s", type(exc).__name__)
 
     @staticmethod
     def _validate_item_receipts(rows, item_results, aggregate_counts):
