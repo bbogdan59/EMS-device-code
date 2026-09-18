@@ -95,13 +95,15 @@ deloc coada. Agentul rămâne compatibil cu serverele vechi: fără `results`,
 python3 -m venv .venv
 .venv/bin/pip install -e '.[test]'
 .venv/bin/pytest -q
+sh -n run.sh deploy/update.sh
+sh tests/test_update_rollback.sh
 ```
 
-CI verifică Python 3.11 și 3.13. Testele MockTransport și Modbus fake nu reprezintă validare pe Pi/invertor sau integrare cu un server web real.
+CI verifică Python 3.11 și 3.13. Testele MockTransport și Modbus fake nu reprezintă validare pe Pi/invertor sau integrare cu un server web real. `tests/test_update_rollback.sh` exercită separat mecanismul de actualizare/rollback (issue #4) cu un venv real, fără root/systemd -- vezi [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 ## Limite și contracte
 
-Vezi [docs/PROTOCOL.md](docs/PROTOCOL.md) pentru API, semne, coadă, profil și extensiile necesare. Frecvența implicită este 10 secunde, nu timp real garantat. Coada păstrează maximum 17.280 mostre (aproximativ 48 ore la 10 secunde); când este plină, refuză mostre noi, incrementează contorul health și păstrează mostrele vechi. SQLite rulează WAL + `synchronous=FULL`; asta reduce riscul la întreruperea procesului/alimentării, dar nu înlocuiește teste reale cu SD și power-cut. Contractul web per-item permite acum retry selectiv/dead-letter; dead-letter-ul nu are încă retenție automată și trebuie monitorizat prin `health`. Sincronizarea ceasului prin OS/NTP este necesară.
+Vezi [docs/PROTOCOL.md](docs/PROTOCOL.md) pentru API, semne, coadă, profil și extensiile necesare, și [docs/OPERATIONS.md](docs/OPERATIONS.md) pentru actualizări verificate cu rollback, buget de resurse măsurat (dar nu pe Pi) și ce rămâne explicit doar pe hardware real. Frecvența implicită este 10 secunde, nu timp real garantat. Coada păstrează maximum 17.280 mostre (aproximativ 48 ore la 10 secunde); când este plină, refuză mostre noi, incrementează contorul health și păstrează mostrele vechi. SQLite rulează WAL + `synchronous=FULL`; asta reduce riscul la întreruperea procesului/alimentării, dar nu înlocuiește teste reale cu SD și power-cut. Contractul web per-item permite acum retry selectiv/dead-letter; dead-letter-ul nu are încă retenție automată și trebuie monitorizat prin `health`. Sincronizarea ceasului prin OS/NTP este necesară.
 
 Implementările viitoare sunt urmărite prin GitHub issues în acest repo și în EMS-management-platform: self-service claim în web, transfer/factory reset, configurație desired/reported, profil DEYE verificat, contoare/diagnoză și scrieri controlate cu readback.
 

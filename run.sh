@@ -32,11 +32,11 @@ install -d -m 0700 -o ems-device -g ems-device "$STATE_DIR"
 
 # Copy only runtime sources. Identity is created in STATE_DIR and is never
 # part of this checkout, so cloning/flashing the OS cannot clone credentials.
-rm -rf "$INSTALL_DIR/src"
-cp -a "$SCRIPT_DIR/src" "$INSTALL_DIR/src"
-install -m 0644 "$SCRIPT_DIR/pyproject.toml" "$INSTALL_DIR/pyproject.toml"
-python3 -m venv "$INSTALL_DIR/.venv"
-"$INSTALL_DIR/.venv/bin/pip" install --disable-pip-version-check "$INSTALL_DIR"
+# See deploy/update.sh (issue #4) for the verified-update-with-rollback
+# logic this sources: it leaves UPGRADE=0|1 and a _rollback_update function
+# in scope here, and exits (aborting this whole script) on a failed smoke
+# test with nothing left to roll back to.
+. "$SCRIPT_DIR/deploy/update.sh"
 
 if [ ! -f "$CONFIG_FILE" ]; then
     cat >"$CONFIG_FILE" <<EOF
@@ -70,4 +70,17 @@ echo "========================================================="
 echo
 
 systemctl enable --now ems-device
+
+if [ "$UPGRADE" -eq 1 ]; then
+    systemctl restart ems-device
+    sleep 3
+    if ! systemctl is-active --quiet ems-device; then
+        echo "Update started but the service failed to stay active; rolling back." >&2
+        _rollback_update
+        systemctl restart ems-device
+        exit 3
+    fi
+    rm -rf "$INSTALL_DIR/src.previous" "$INSTALL_DIR/pyproject.toml.previous"
+fi
+
 echo "Provisioning complete. The customer only needs power/network, RS485, and the sealed device code."

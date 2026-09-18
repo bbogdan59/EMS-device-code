@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import uuid
 from types import SimpleNamespace
 import httpx
@@ -379,3 +380,78 @@ def test_disabled_reader_reports_no_telemetry_capability(tmp_path):
 def test_retry_after_is_honored_and_bounded():
     assert _retry_delay(httpx.Response(503, headers={'Retry-After': '45'}), 1) == 45
     assert _retry_delay(httpx.Response(503, headers={'Retry-After': '9999'}), 1) == 300
+
+
+# --- issue #4: storage-full resilience --------------------------------------
+
+
+class _FlakyConnection:
+    """Wraps a real sqlite3.Connection so `execute()` can be made to fail on
+    demand. sqlite3.Connection is a C type: neither its class nor an
+    instance's `execute` attribute can be monkeypatched directly (both raise
+    TypeError/AttributeError -- tried first), so `state.db` is swapped for
+    this proxy instead. `with state.db:` still demarcates a real transaction
+    via the wrapped connection; only `execute()` calls made INSIDE that
+    block are interceptable, which is exactly what's needed to simulate
+    ENOSPC on a specific write."""
+
+    def __init__(self, real, should_fail):
+        self._real = real
+        self._should_fail = should_fail
+
+    def execute(self, sql, *args):
+        if self._should_fail(sql):
+            raise sqlite3.OperationalError('database or disk is full')
+        return self._real.execute(sql, *args)
+
+    def __enter__(self):
+        return self._real.__enter__()
+
+    def __exit__(self, *exc_info):
+        return self._real.__exit__(*exc_info)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_disk_full_during_sample_does_not_corrupt_queue_or_crash(tmp_path):
+    """Simulates SQLite returning ENOSPC ('database or disk is full') on the
+    INSERT inside `enqueue`. No portable unit test can validate real SD-card/
+    power-loss durability (see docs/PROTOCOL.md) -- this validates the
+    SOFTWARE contract: a write failure here must not corrupt already-queued
+    data or crash the agent process, and must recover cleanly once space is
+    available again, matching how `cli.py`'s run loop treats any `sample()`
+    failure (logged, loop continues) and how `Agent._record_error` itself
+    tolerates a second failure while trying to record the first one."""
+    state = State(tmp_path)
+    reader = Simulator()
+    calls = {'n': 0}
+
+    def should_fail(sql):
+        if sql.startswith('INSERT INTO outbox') and calls['n'] == 0:
+            calls['n'] += 1
+            return True
+        return False
+
+    state.db = _FlakyConnection(state.db, should_fail)
+    with pytest.raises(sqlite3.OperationalError):
+        Agent(state, None, reader).sample()
+    assert state.pending() == []  # nothing corrupted; nothing partially written
+
+    Agent(state, None, reader).sample()  # "disk space freed" -- calls['n'] already consumed
+    assert len(state.pending()) == 1  # recovered cleanly, exactly one sample queued
+    state.close()
+
+
+def test_disk_full_while_recording_health_error_does_not_mask_original_error(tmp_path):
+    """`_record_error` itself writes to the same (possibly full) database.
+    Agent already wraps that write in its own try/except (see agent.py) --
+    this pins down that a SECOND disk-full failure there is swallowed with a
+    log warning, not raised in place of the original sample() error."""
+    state = State(tmp_path)
+    reader = SimpleNamespace(read=lambda: (_ for _ in ()).throw(OSError('rs485 gone')), simulated=False)
+    state.db = _FlakyConnection(state.db, should_fail=lambda sql: True)
+
+    with pytest.raises(OSError, match='rs485 gone'):
+        Agent(state, None, reader).sample()
+    state.close()

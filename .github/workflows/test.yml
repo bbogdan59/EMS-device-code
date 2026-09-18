@@ -15,3 +15,5 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install -e '.[test]'
       - run: pytest -q
+      - run: sh -n run.sh deploy/update.sh
+      - run: sh tests/test_update_rollback.sh
