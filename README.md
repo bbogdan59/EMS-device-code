@@ -12,7 +12,7 @@ Primul subset funcțional al controllerului local Python pentru EMS. **v0.1 este
 - Simulator explicit și transport Modbus RTU RS485 read-only bazat pe profil local auditat.
 - Serviciu systemd, oprire SIGTERM/SIGINT și teste fără hardware.
 
-**Nu este inclusă o hartă DEYE validată.** Modelul și firmware-ul nu au fost specificate. Exemplul din `profiles/` este intenționat nevalidat și nu poate porni citirea. Nu copia registre de la altă familie DEYE. Marcarea `verified=true` este o atestare a operatorului, nu autodetecție sau certificare realizată de software.
+**Nu este inclusă o hartă DEYE validată pe hardware real.** `profiles/schema-example.json` rămâne intenționat gol/nevalidat. `profiles/deye_sg04lp3_candidate.json` (issue #1) adaugă un candidat mult mai complet pentru familia Deye SUN-*K-SG04LP3-EU (5/6/8/10/12K, inclusiv varianta 10K) -- adrese/encodări/scale transcrise dintr-o sursă comunitară citată explicit (nu documentația oficială, blocată de rețea în acest mediu), dar **livrat tot cu `verified: false`**: nimeni nu l-a citit de pe un invertor real în această sesiune. Vezi `docs/VALIDATION_SG04LP3.md` pentru exact ce rămâne de confirmat (în special sensul puterii/curentului de baterie) înainte ca un operator să îl comute pe `verified: true`. Nu copia registre de la altă familie DEYE. Marcarea `verified=true` este o atestare a operatorului, nu autodetecție sau certificare realizată de software.
 
 ## OS și hardware
 
