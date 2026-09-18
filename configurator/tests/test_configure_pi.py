@@ -8,9 +8,16 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from configure_pi import (
+    AGENT_BIN,
     ConfiguratorError,
     build_tarball,
+    check_existing_install,
+    fetch_remote_identity,
+    parse_identity_output,
     parse_run_sh_output,
+    perform_reset,
+    remote_agent_command,
+    remote_reset_command,
     remote_run_command,
     run_remote_streaming,
     should_exclude,
@@ -253,3 +260,78 @@ def test_upload_and_extract_raises_on_extract_failure():
     ])
     with pytest.raises(ConfiguratorError, match="extract"):
         upload_and_extract(client, b"bytes", "staging")
+
+
+# --- reset-before-reconfigure (a prior install may already exist) --------
+
+
+def test_remote_agent_command_runs_as_isolated_user_not_root():
+    command = remote_agent_command("identity")
+    assert f"-u ems-device {AGENT_BIN}" in command
+    assert "identity" in command
+
+
+def test_remote_reset_command_soft_omits_factory_flag():
+    command = remote_reset_command("soft", "EMS-ABCD-1234")
+    assert "reset" in command
+    assert "--confirm-serial EMS-ABCD-1234" in command
+    assert "--factory" not in command
+
+
+def test_remote_reset_command_factory_includes_factory_flag():
+    command = remote_reset_command("factory", "EMS-ABCD-1234")
+    assert "--confirm-serial EMS-ABCD-1234" in command
+    assert "--factory" in command
+
+
+def test_parse_identity_output_extracts_known_fields():
+    output = "serial_number=EMS-1\ninstallation_uuid=uuid-1\nenrollment_status=assigned\n"
+    assert parse_identity_output(output) == {
+        "serial_number": "EMS-1",
+        "installation_uuid": "uuid-1",
+        "enrollment_status": "assigned",
+    }
+
+
+def test_parse_identity_output_missing_fields_are_absent_not_fabricated():
+    assert parse_identity_output("some unrelated log line\n") == {}
+
+
+def test_check_existing_install_true_when_binary_present():
+    client = FakeSSHClient([([], 0)])  # `test -x` succeeds
+    assert check_existing_install(client) is True
+    assert f"test -x {AGENT_BIN}" in client.commands[0]
+
+
+def test_check_existing_install_false_on_fresh_unit():
+    client = FakeSSHClient([([], 1)])  # `test -x` fails: nothing installed yet
+    assert check_existing_install(client) is False
+
+
+def test_fetch_remote_identity_parses_successful_output():
+    client = FakeSSHClient([([b"serial_number=EMS-1\n", b"enrollment_status=assigned\n"], 0)])
+    identity = fetch_remote_identity(client, "hunter2")
+    assert identity == {"serial_number": "EMS-1", "enrollment_status": "assigned"}
+
+
+def test_fetch_remote_identity_raises_on_nonzero_exit():
+    client = FakeSSHClient([([b"error\n"], 1)])
+    with pytest.raises(ConfiguratorError, match="identity"):
+        fetch_remote_identity(client, "hunter2")
+
+
+def test_perform_reset_runs_reset_command_and_returns_exit_status():
+    client = FakeSSHClient([([b"Assignment cleared. Serial unchanged: EMS-1\n"], 0)])
+    exit_status, output = perform_reset(client, "hunter2", "soft", "EMS-1")
+    assert exit_status == 0
+    assert "Assignment cleared" in output
+    assert "reset" in client.commands[0]
+    assert "--confirm-serial EMS-1" in client.commands[0]
+    assert "--factory" not in client.commands[0]
+
+
+def test_perform_reset_factory_mode_passes_factory_flag():
+    client = FakeSSHClient([([b"Factory reset complete. New serial: EMS-2\n"], 0)])
+    exit_status, _output = perform_reset(client, "hunter2", "factory", "EMS-1")
+    assert exit_status == 0
+    assert "--factory" in client.commands[0]

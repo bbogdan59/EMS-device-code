@@ -46,6 +46,29 @@ flow, so this doubles as your remote-update tool (`git pull` locally, then
 re-run the configurator) and gets its automatic rollback-on-failure for
 free.
 
+## Re-running on a Pi that's already installed
+
+If the configurator finds an existing install on the target Pi (i.e. this
+isn't the first run), it prints the current serial/enrollment status and
+offers a reset **before** reconfiguring, reusing the device's own `ems-device
+reset` CLI action (issue #3) -- nothing new is added on the device side:
+
+- **[n] none** (default) -- keep the current assignment and identity, just
+  update the software. Use this for routine updates on a device that's
+  already claimed by a customer.
+- **[s] soft** -- clears the station assignment and issues a new Device
+  Code, but keeps the same serial/identity. Use this to take a returned/
+  unclaimed unit back to "ready to ship" without wiping its history.
+- **[f] factory** -- wipes everything (identity, outbox, dead-letter) and
+  issues a brand new serial and Device Code. Use this only when repurposing
+  hardware for an unrelated customer. This is destructive and irreversible;
+  the configurator asks you to re-type the exact serial to confirm, on top
+  of the device's own `--confirm-serial` check.
+
+A reset failure (wrong sudo password, device CLI error) aborts before
+touching the install -- it never silently proceeds to reconfigure a device
+whose reset didn't actually happen.
+
 ## What it does, step by step
 
 1. Connects over SSH (`paramiko`, TOFU host-key acceptance -- prints the
