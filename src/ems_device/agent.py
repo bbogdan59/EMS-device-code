@@ -3,7 +3,7 @@ import math
 import uuid
 from datetime import datetime, timezone
 from . import __version__
-from .readers import FIELDS
+from .readers import FIELDS, SIGNED_FIELDS
 
 log = logging.getLogger(__name__)
 
@@ -55,8 +55,8 @@ class Agent:
             for key, value in values.items():
                 if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
                     raise ValueError("non_finite_telemetry")
-                if key in {"pv_power_w", "load_power_w"} and value < 0:
-                    raise ValueError("negative_unsigned_power")
+                if key not in SIGNED_FIELDS and key != "battery_soc_percent" and value < 0:
+                    raise ValueError("negative_unsigned_field")
                 if key == "battery_soc_percent" and not 0 <= value <= 100:
                     raise ValueError("soc_out_of_range")
             item = {"boot_id": self.boot_id, "sequence": self.sequence, "schema_version": 1,

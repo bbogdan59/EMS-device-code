@@ -130,6 +130,9 @@ def main():
             reader = Simulator()
         elif mode == "modbus":
             reader = ModbusReader(settings["modbus"])
+            # O singura citire de verificare, inainte de bucla periodica --
+            # refuza devreme un profil incompatibil (vezi ModbusReader.check_ready).
+            reader.check_ready()
         else:
             raise ValueError("reader must be disabled, simulator or modbus")
         interval = settings.get("sample_seconds", 10)

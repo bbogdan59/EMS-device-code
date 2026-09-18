@@ -45,12 +45,21 @@ copiată și ștearsă atomic în SQLite, apoi poate fi inspectată local cu
 
 PyModbus 3.11.3, [API oficial](https://pymodbus.readthedocs.io/en/v3.11.3/source/client.html). Un singur apel serial la un moment dat. Profil JSON cu `verified`, model exact, firmware validat, sursă/revizie protocol și `points`. Fiecare punct are:
 
-- `field`: unul dintre cele cinci câmpuri de mai sus, fără duplicate;
-- `address`: adresă PDU zero-based confirmată, 0..65535;
+- `field`: unul dintre câmpurile din `ems_device.readers.FIELDS` (cele cinci originale plus extensiile issue #1: PV per string, rețea/load per fază, temperaturi, status brut, contoare cumulative), fără duplicate;
+- `address`: adresă PDU zero-based confirmată, 0..65535 -- pentru puncte pe 32 de biți, adresa este primul din cele două registre adiacente;
 - `function`: numai 3 holding / 4 input;
-- `encoding`: numai u16/s16; `scale`: multiplicator către W sau %, inclusiv inversarea semnului dacă protocolul o cere.
+- `encoding`: u16/s16/u32/s32; punctele pe 32 de biți cer `word_order` (`low_high` -- registrul de la `address` e cuvântul jos, convenția obișnuită Deye pentru contoare -- sau `high_low`);
+- `scale`: multiplicator către W/V/A/°C/% sau %, inclusiv inversarea semnului dacă protocolul o cere; `offset` (opțional, implicit 0) se adună DUPĂ scalare -- necesar pentru convenția Deye de temperatură (`raw*scale - 100`).
 
-Nu există adrese demonstrative care ar putea fi confundate cu registre DEYE reale. Profilul minim are 1..32 puncte. 32-bit, word-order, sentinele de indisponibilitate, identitate invertor, gruparea blocurilor și detectarea modelului sunt în backlog. Un profil local greșit poate produce valori plauzibile: validarea hardware rămâne obligatorie.
+Opțional, profilul poate declara:
+
+- `blocks`: listă de `{function, start, length}` -- registre citite într-un singur apel Modbus în loc de unul per punct. Fiecare bloc trebuie să acopere STRICT adrese deja documentate de puncte (nicio "traversare" a unei zone nedocumentate doar ca să unească două puncte apropiate); blocurile nu se pot suprapune; lungimea e limitată la `MAX_BLOCK_REGISTERS=60` (sub limita Modbus de 125, ca să reducă riscul unui cadru RS485 lung pe o magistrală/adaptor zgomotos). Fără `blocks`, comportamentul rămâne cel din v0.1 (un apel per punct).
+- `computed`: câmpuri derivate ca sumă a altor puncte deja citite (ex. `pv_power_w` = `pv1_power_w` + `pv2_power_w`, pentru că Deye SG04LP3 nu expune un registru unic de putere PV totală). Fiecare termen din `sum_of` trebuie să fie un punct deja definit.
+- `readiness_check`: `{field, allowed_values}` -- citit O SINGURĂ DATĂ, înainte de bucla periodică de eșantionare (`ModbusReader.check_ready()`, apelat din `cli.py` imediat după construirea reader-ului), ca să refuze devreme un profil incompatibil. Nu este o scanare de adrese/baudrate -- doar o citire a unui registru deja declarat ca punct, comparată cu valorile așteptate documentate.
+
+Nu există adrese demonstrative care ar putea fi confundate cu registre DEYE reale. Profilul minim are 1..64 puncte. Sentinelele de indisponibilitate rămân în backlog (niciun profil livrat cu acest repo nu documentează încă unul confirmat -- vezi `docs/VALIDATION_SG04LP3.md`). Un profil local greșit poate produce valori plauzibile: validarea hardware rămâne obligatorie, iar `verified: true` este o atestare a operatorului dupa acea validare, niciodata a codului/agentului.
+
+Primul profil candidat cu extensiile de mai sus, `profiles/deye_sg04lp3_candidate.json` (Deye SUN-*K-SG04LP3-EU, familia care include varianta 10K), este livrat cu `verified: false` -- sursa exactă și lista completă a ce rămâne de confirmat pe hardware real sunt în `docs/VALIDATION_SG04LP3.md`.
 
 ## Flux de instalare și stadiu
 
