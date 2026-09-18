@@ -15,3 +15,16 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install -e '.[test]'
       - run: pytest -q
+
+  configurator:
+    # Separate job: the configurator is a local operator tool (paramiko),
+    # never installed on the Pi -- keeps its dependency out of the main
+    # package's pinned, minimal on-device install entirely.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -r configurator/requirements-test.txt
+      - run: python -m pytest configurator/tests/ -v
