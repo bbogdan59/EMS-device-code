@@ -59,6 +59,21 @@ TAR_EXCLUDE_PATTERNS = (
 
 DEFAULT_AUTODETECT_HOSTS = ("raspberrypi.local", "raspberrypi.lan")
 
+# Where run.sh installs the agent (see README.md) -- used to detect a prior
+# install and, if the operator asks for one, to invoke the already-existing
+# `ems-device reset` CLI action (issue #3) remotely, over the same SSH
+# session. No new device-side code: this only orchestrates what a technician
+# would otherwise type by hand.
+AGENT_BIN = "/opt/ems-device/.venv/bin/ems-device"
+AGENT_CONFIG = "/etc/ems-device/config.toml"
+AGENT_USER = "ems-device"
+
+RESET_MODE_CHOICES = {
+    "": "none", "n": "none", "none": "none",
+    "s": "soft", "soft": "soft",
+    "f": "factory", "factory": "factory",
+}
+
 
 def should_exclude(relative_path: str) -> bool:
     """`relative_path` uses forward slashes, no leading './'."""
@@ -117,6 +132,33 @@ def parse_run_sh_output(output: str) -> dict:
 def remote_run_command(staging_dir: str, platform_url: str) -> str:
     env_prefix = f'EMS_PLATFORM_URL="{platform_url}" ' if platform_url else ""
     return f"sudo -S -p '' bash -c 'cd {posixpath.join(staging_dir, REPO_ROOT.name)} && {env_prefix}./run.sh'"
+
+
+def remote_agent_command(action: str, extra_args: str = "") -> str:
+    """Builds the same command a technician runs by hand (see README.md's
+    diagnostic snippets) -- always as the isolated `ems-device` user, never
+    root, matching how the systemd service itself runs the agent."""
+    tail = f" {extra_args}" if extra_args else ""
+    return f"sudo -S -p '' -u {AGENT_USER} {AGENT_BIN} --config {AGENT_CONFIG} {action}{tail}"
+
+
+def remote_reset_command(mode: str, confirm_serial: str) -> str:
+    """`mode` is 'soft' or 'factory' (never 'none' -- callers only invoke
+    this once a reset was actually requested)."""
+    factory_flag = " --factory" if mode == "factory" else ""
+    return remote_agent_command("reset", f"--confirm-serial {confirm_serial}{factory_flag}")
+
+
+def parse_identity_output(output: str) -> dict:
+    """Extracts the `key=value` lines `ems-device ... identity` prints.
+    Missing keys are simply absent -- never fabricated."""
+    result = {}
+    for line in output.splitlines():
+        line = line.strip()
+        key, sep, value = line.partition("=")
+        if sep and key in ("serial_number", "installation_uuid", "enrollment_status"):
+            result[key] = value
+    return result
 
 
 class ConfiguratorError(Exception):
@@ -187,6 +229,34 @@ def run_remote_streaming(client: "paramiko.SSHClient", command: str, sudo_passwo
     return channel.recv_exit_status(), "".join(captured)
 
 
+def check_existing_install(client: "paramiko.SSHClient") -> bool:
+    """True if a prior run.sh already installed the agent binary on this Pi.
+    A fresh, never-provisioned unit legitimately fails this check -- that's
+    the normal first-install path, not an error."""
+    _stdin, stdout, _stderr = client.exec_command(f"test -x {AGENT_BIN}")
+    return stdout.channel.recv_exit_status() == 0
+
+
+def fetch_remote_identity(client: "paramiko.SSHClient", sudo_password: str) -> dict:
+    """Runs `ems-device ... identity` on the Pi and parses its output. Used
+    only to learn the current serial so a reset can be offered/confirmed --
+    never to print or store any secret (identity has none)."""
+    command = remote_agent_command("identity")
+    exit_status, output = run_remote_streaming(client, command, sudo_password)
+    if exit_status != 0:
+        raise ConfiguratorError(f"Could not read the existing device identity (exit {exit_status}).")
+    return parse_identity_output(output)
+
+
+def perform_reset(client: "paramiko.SSHClient", sudo_password: str, mode: str, confirm_serial: str) -> tuple[int, str]:
+    """Invokes the existing `ems-device reset` CLI action (issue #3) remotely.
+    `mode` is 'soft' (clear assignment, keep identity) or 'factory' (wipe
+    everything, issue a brand new identity) -- reuses the device's own
+    --confirm-serial safety check, nothing reimplemented here."""
+    command = remote_reset_command(mode, confirm_serial)
+    return run_remote_streaming(client, command, sudo_password)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--host", help="Pi hostname/IP. Autodetects raspberrypi.local if omitted.")
@@ -234,7 +304,46 @@ def main(argv=None) -> int:
         return 1
 
     try:
-        print("Packaging this checkout ...")
+        if check_existing_install(client):
+            print("\nThis Pi already has the agent installed.")
+            try:
+                identity = fetch_remote_identity(client, sudo_password)
+            except ConfiguratorError as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
+            serial = identity.get("serial_number")
+            if serial:
+                print(f"  Serial: {serial}")
+                if identity.get("enrollment_status"):
+                    print(f"  Enrollment: {identity['enrollment_status']}")
+                answer = input(
+                    "\nReset before reconfiguring?\n"
+                    "  [n] none -- keep the current assignment/identity, just update (default)\n"
+                    "  [s] soft -- clear the station assignment, issue a new Device Code, keep the serial\n"
+                    "  [f] factory -- wipe everything (identity, outbox, dead-letter); a brand new serial is issued\n"
+                    "Choice [n/s/f]: "
+                ).strip().lower()
+                mode = RESET_MODE_CHOICES.get(answer, "none")
+                if answer and mode == "none" and answer not in RESET_MODE_CHOICES:
+                    print(f"Unrecognized choice {answer!r}; defaulting to no reset.")
+                if mode == "factory":
+                    confirm = input(
+                        f"This PERMANENTLY wipes device {serial} (identity, outbox, dead-letter) and issues a "
+                        f"new serial. Type the serial ({serial}) again to confirm, or leave empty to cancel: "
+                    ).strip()
+                    if confirm != serial:
+                        print("Factory reset not confirmed; continuing without a reset.")
+                        mode = "none"
+                if mode != "none":
+                    print(f"\nRunning {mode} reset on the Pi ...\n")
+                    exit_status, _reset_output = perform_reset(client, sudo_password, mode, serial)
+                    if exit_status != 0:
+                        print(f"\nReset exited with status {exit_status}; aborting before reconfiguring.", file=sys.stderr)
+                        return exit_status
+            else:
+                print("Could not determine the existing serial; continuing without offering a reset.")
+
+        print("\nPackaging this checkout ...")
         tarball = build_tarball(REPO_ROOT)
         staging_dir = f".ems-configurator/deploy-{int(time.time())}"
         print(f"Copying to the Pi ({len(tarball)} bytes) ...")
