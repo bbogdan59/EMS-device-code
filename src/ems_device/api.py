@@ -27,5 +27,11 @@ class API:
     def enroll(self, payload):
         return self.call("POST", "/devices/enroll", payload, authenticated=False)
 
+    def rotate_credential(self):
+        """Authenticates with the CURRENT secret; the server revokes it
+        immediately and returns the new one once. See state.py for how a
+        lost/ambiguous response is made safe rather than silently retried."""
+        return self.call("POST", "/devices/credentials/rotate", {})
+
     def close(self):
         self.client.close()

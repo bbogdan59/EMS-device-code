@@ -10,6 +10,7 @@ Contract inspectat în `bbogdan59/EMS-management-platform`, baza inițială `d14
 | Configurație | GET /api/v1/config | cache config_version/preference_version; nu confirmă aplicarea în invertor |
 | Prezență | POST /api/v1/devices/heartbeat | boot_id, firmware_version agent, telemetry=true, inverter_write=false |
 | Telemetrie | POST /api/v1/telemetry/batch | ACK per item: șterge accepted/duplicate, păstrează retryable, mută permanent în dead-letter; fallback sigur la răspunsul agregat vechi |
+| Rotație credential | POST /api/v1/devices/credentials/rotate | issue #3: autentificat cu secretul CURENT; serverul revocă imediat vechiul secret și întoarce unul nou o singură dată (`api.rotate_credential`, CLI `rotate-credential`) |
 
 Înainte de assignment, dovada device-ului este `provisioning_secret`, generat și
 păstrat local. După assignment, autentificarea este `Authorization: Bearer
@@ -75,9 +76,53 @@ Primul profil candidat cu extensiile de mai sus, `profiles/deye_sg04lp3_candidat
    până la disponibilitatea unui profil DEYE validat.
 
 Pașii 1, 2, 4 și modul sigur sunt implementați în agent. Claim-ul self-service
-din pasul 3 este contractul comun cu `EMS-management-platform#44`. Transferul,
-revocarea/factory reset, identificarea DEYE și desired/reported complet rămân
-work items separate.
+din pasul 3 este contractul comun cu `EMS-management-platform#44`. Identificarea
+DEYE (issue #1) și desired/reported complet rămân work items separate.
+
+## Recuperare după revocare/transfer/factory-reset (issue #3)
+
+`EMS-management-platform` are UI de admin pentru revoke/transfer/factory-reset
+(`device_service.revoke_device`/`transfer_device`/`factory_reset_device`), dar
+NICIUNA dintre aceste acțiuni are un canal push către device -- agentul nu are
+niciun endpoint de tip "notificare". Singurul semnal pe care device-ul îl
+poate observa este un `401`/`403` la următorul `heartbeat`/`config`/`telemetry`,
+pentru că serverul a revocat deja credentialul curent.
+
+Recuperarea e deliberat MANUALĂ, niciodată automată (un 401 tranzitoriu -- bug
+server, ceas nesincronizat -- nu trebuie să distrugă o asociere încă validă):
+
+- Agentul se oprește (`CredentialInactiveError`, `SystemExit(1)`); systemd îl
+  repornește, dar bucla de enrollment (`while not state.get("credentials")`)
+  NU se reactivează singură cât timp `credentials` locale există, chiar dacă
+  serverul le-a revocat -- fără intervenție ar rezulta o buclă de crash
+  infinită cu un credential mereu invalid.
+- Operatorul rulează `ems-device ... reset --confirm-serial <serial>`
+  (`State.clear_assignment`): șterge `credentials`/`enrollment_status`/
+  `platform_origin` local, emite un Device Code nou (cel vechi e deja
+  consumat/compromis), PĂSTREAZĂ `installation_uuid`/`serial_number`/
+  `provisioning_secret` -- aceeași unitate fizică, gata de re-enrollment către
+  o stație (sau chiar un `platform_url`) nou.
+- `reset --factory` (`State.factory_reset`) e pentru hardware repus în
+  circuit pentru alt client: șterge și coada/dead-letter locale și emite o
+  identitate COMPLET nouă -- nimic din instalarea anterioară nu mai e
+  reutilizabil, simetric cu regula "nicio identitate în imaginea OS".
+- Ambele cer `--confirm-serial` EXACT egal cu serialul curent (`identity`) --
+  fără potrivire, comanda refuză și nu schimbă nimic local.
+
+`accept_enrollment_response` respinge explicit (`assignment_identity_mismatch`)
+un răspuns "assigned" pentru un device/station DIFERIT de cel deja persistat
+local, ca plasă de siguranță suplimentară față de un race/replay ("două
+conturi" din criteriile de acceptare) -- deși în fluxul normal acest cod nu e
+niciodată atins din nou după ce `credentials` există (nici `run`, nici
+`provision` nu re-apelează `enroll()` în acel caz).
+
+Rotația de credential (`rotate-credential`) marchează local
+`credential_rotation_pending=true` ÎNAINTE de cererea de rețea; dacă răspunsul
+se pierde, agentul NU poate distinge "rotația a reușit server-side dar am
+pierdut confirmarea" de "a fost efectiv revocat" -- deci nu reîncearcă orbește
+cu vechiul secret. Flag-ul rămâne vizibil în `health` până la următoarea
+rotație reușită sau un `reset`, care rezolvă oricare din cele două posibilități
+uniform.
 
 ## Distribuirea release-urilor
 
