@@ -74,17 +74,4 @@ echo "========================================================="
 echo
 
 systemctl enable --now ems-device
-
-if [ "$UPGRADE" -eq 1 ]; then
-    systemctl restart ems-device
-    sleep 3
-    if ! systemctl is-active --quiet ems-device; then
-        echo "Update started but the service failed to stay active; rolling back." >&2
-        _rollback_update
-        systemctl restart ems-device
-        exit 3
-    fi
-    rm -rf "$INSTALL_DIR/src.previous" "$INSTALL_DIR/pyproject.toml.previous"
-fi
-
 echo "Provisioning complete. The customer only needs power/network, RS485, and the sealed device code."
