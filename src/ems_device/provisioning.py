@@ -67,11 +67,19 @@ def accept_enrollment_response(state, response: dict) -> str:
         station_id = str(uuid.UUID(str(response["station_id"])))
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("Invalid assigned enrollment response") from exc
+    existing = state.get("credentials")
+    if existing and (existing.get("device_id") != device_id or existing.get("station_id") != station_id):
+        # Defense in depth against a race/replay handing this device a
+        # DIFFERENT station's assignment (issue #3 "two accounts" case) --
+        # in practice this path is never reached in normal operation (both
+        # `run` and `provision` only call enroll() while no credentials are
+        # stored yet), but accept_enrollment_response must never silently
+        # switch tenants if it ever is.
+        raise ValueError("assignment_identity_mismatch: refusing to overwrite an existing different assignment")
     secret = response.get("credential_secret")
     if not isinstance(secret, str) or not secret:
         # Once the bootstrap credential was used, the server intentionally no
         # longer returns it. A device that already persisted it is fine.
-        existing = state.get("credentials")
         if existing and existing.get("device_id") == device_id and existing.get("station_id") == station_id:
             return "assigned"
         raise ValueError("Assigned enrollment response has no bootstrap credential")

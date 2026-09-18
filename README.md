@@ -89,6 +89,40 @@ incomplet, cu identitate greșită sau cu totaluri contradictorii nu modifică
 deloc coada. Agentul rămâne compatibil cu serverele vechi: fără `results`,
 șterge batch-ul numai la succes agregat integral.
 
+### Transfer, revocare, factory reset (issue #3)
+
+Nicio revocare/transfer/factory-reset declanșat din admin-ul web nu ajunge
+direct la device -- singurul semnal e un `401`/`403` la următorul apel
+autentificat (`journalctl` arată tipul `CredentialInactiveError`, niciodată
+textul răspunsului). Recuperarea e mereu manuală, cerută explicit de
+operator, niciodată automată:
+
+```sh
+# elibereaza asocierea curenta (transfer catre alta statie/platforma);
+# identitatea fizica (serial/UUID) ramane neschimbata, un Device Code nou e emis
+sudo -u ems-device /opt/ems-device/.venv/bin/ems-device --config /etc/ems-device/config.toml \
+  reset --confirm-serial EMS-XXXX-XXXX-XXXX
+
+# reprovizionare completa (hardware repus in circuit pentru alt client):
+# emite o identitate noua in intregime, sterge coada/dead-letter locale
+sudo -u ems-device /opt/ems-device/.venv/bin/ems-device --config /etc/ems-device/config.toml \
+  reset --factory --confirm-serial EMS-XXXX-XXXX-XXXX
+```
+
+`--confirm-serial` trebuie să fie EXACT serialul afișat de `identity` -- fără
+potrivire exactă, comanda refuză și nu schimbă nimic. După `reset`, urmatorul
+`provision`/`run` reia enrollment-ul automat (eventual către un `platform_url`
+nou din `config.toml`, acum că `platform_origin` local a fost eliberat).
+
+`rotate-credential` cere platformei un secret nou pentru identitatea deja
+alocată (`POST /devices/credentials/rotate`, autentificat cu secretul curent).
+Marchează local o rotație "in curs" ÎNAINTE de cererea de rețea, ca un răspuns
+pierdut (crash, retea cazuta) să rămână vizibil (`health` →
+`credential_rotation_pending: true`) în loc să dispară tăcut -- agentul nu
+poate distinge singur "rotația a reușit dar am pierdut răspunsul" de "a fost
+efectiv revocat", așa că nu reîncearcă orbește; recuperarea folosește tot
+`reset`.
+
 ## Dezvoltare
 
 ```sh

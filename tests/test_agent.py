@@ -1,8 +1,10 @@
 import json
+import sys
 import uuid
 from types import SimpleNamespace
 import httpx
 import pytest
+from ems_device import cli as cli_module
 from ems_device.agent import Agent
 from ems_device.api import API
 from ems_device.cli import _clock_sync_status, _retry_delay
@@ -379,3 +381,264 @@ def test_disabled_reader_reports_no_telemetry_capability(tmp_path):
 def test_retry_after_is_honored_and_bounded():
     assert _retry_delay(httpx.Response(503, headers={'Retry-After': '45'}), 1) == 45
     assert _retry_delay(httpx.Response(503, headers={'Retry-After': '9999'}), 1) == 300
+
+
+# --- issue #3: transfer / factory reset / credential rotation ---------------
+
+
+def test_clear_assignment_keeps_identity_but_drops_binding(tmp_path):
+    state = State(tmp_path)
+    identity_before = state.identity()
+    state.set('credentials', CREDS)
+    state.set('enrollment_status', 'assigned')
+    state.set('platform_origin', 'https://old.example.com')
+    state.set('credential_rotation_pending', True)
+
+    state.clear_assignment()
+
+    assert state.get('credentials') is None
+    assert state.get('enrollment_status') is None
+    assert state.get('platform_origin') is None
+    assert state.get('credential_rotation_pending') is False
+    after = state.identity()
+    assert after['installation_uuid'] == identity_before['installation_uuid']
+    assert after['serial_number'] == identity_before['serial_number']
+    assert after['provisioning_secret'] == identity_before['provisioning_secret']
+    # A fresh activation code -- the old one is one-use and may be compromised.
+    assert after['activation_code'] != identity_before['activation_code']
+    assert after['activation_code'].startswith('ACT-')
+    state.close()
+
+
+def test_clear_assignment_allows_rebinding_to_a_different_platform(tmp_path):
+    state = State(tmp_path)
+    state.set('platform_origin', 'https://old.example.com')
+    state.clear_assignment()
+    # No exception: the old binding is gone, a new origin is free to be set.
+    state.set('platform_origin', 'https://new.example.com')
+    assert state.get('platform_origin') == 'https://new.example.com'
+    state.close()
+
+
+def test_factory_reset_issues_a_new_identity_and_wipes_queue(tmp_path):
+    state = State(tmp_path)
+    identity_before = state.identity()
+    state.set('credentials', CREDS)
+    state.enqueue({'boot_id': 'b', 'sequence': 1})
+    state.db.execute(
+        "INSERT INTO dead_letter(original_outbox_id,payload,reason_code,failed_at) VALUES (99,'{}','x','2026-01-01T00:00:00+00:00')"
+    )
+    state.db.commit()
+
+    state.factory_reset()
+
+    after = state.identity()
+    assert after['installation_uuid'] != identity_before['installation_uuid']
+    assert after['serial_number'] != identity_before['serial_number']
+    assert after['provisioning_secret'] != identity_before['provisioning_secret']
+    assert state.get('credentials') is None
+    assert state.pending() == []
+    assert state.dead_letters() == []
+    snapshot = state.health_snapshot(agent_version='test', clock_sync='unknown')
+    assert snapshot['outbox']['backlog'] == 0
+    assert snapshot['dead_letter_count'] == 0
+    state.close()
+
+
+def test_health_snapshot_reports_enrollment_status_and_rotation_pending(tmp_path):
+    state = State(tmp_path)
+    snapshot = state.health_snapshot(agent_version='test', clock_sync='unknown')
+    assert snapshot['enrollment_status'] is None
+    assert snapshot['credential_rotation_pending'] is False
+    state.set('enrollment_status', 'assigned')
+    state.set('credential_rotation_pending', True)
+    snapshot = state.health_snapshot(agent_version='test', clock_sync='unknown')
+    assert snapshot['enrollment_status'] == 'assigned'
+    assert snapshot['credential_rotation_pending'] is True
+    state.close()
+
+
+def test_assigned_response_refuses_to_overwrite_a_different_existing_assignment(tmp_path):
+    state = State(tmp_path)
+    state.set('credentials', CREDS)
+    other_response = {'status': 'assigned', 'device_id': str(uuid.uuid4()), 'station_id': str(uuid.uuid4()),
+                       'credential_secret': 'someone-elses-secret'}
+    with pytest.raises(ValueError, match='assignment_identity_mismatch'):
+        accept_enrollment_response(state, other_response)
+    # Original assignment must be untouched.
+    assert state.get('credentials') == CREDS
+    state.close()
+
+
+def test_revoked_enrollment_status_is_rejected_and_recorded(tmp_path):
+    state = State(tmp_path)
+    with pytest.raises(ValueError, match='revoked'):
+        accept_enrollment_response(state, {'status': 'revoked'})
+    assert state.get('enrollment_status') == 'revoked'
+    assert state.get('credentials') is None
+    state.close()
+
+
+def test_assigned_response_without_secret_and_no_existing_credentials_is_rejected(tmp_path):
+    state = State(tmp_path)
+    response = {'status': 'assigned', 'device_id': str(uuid.uuid4()), 'station_id': str(uuid.uuid4())}
+    with pytest.raises(ValueError, match='no bootstrap credential'):
+        accept_enrollment_response(state, response)
+    state.close()
+
+
+def test_rotate_credential_api_call_shape():
+    def handler(request):
+        assert request.url.path == '/api/v1/devices/credentials/rotate'
+        assert request.headers['Authorization'] == f"Bearer {CREDS['device_id']}.test-only"
+        assert json.loads(request.content) == {}
+        return httpx.Response(200, json={'device_id': CREDS['device_id'], 'credential_secret': 'rotated-secret'})
+    api = API('https://ems.example.com', CREDS, transport=httpx.MockTransport(handler))
+    assert api.rotate_credential() == {'device_id': CREDS['device_id'], 'credential_secret': 'rotated-secret'}
+    api.close()
+
+
+# --- issue #3: cli.main() end-to-end, mocked HTTP transport -----------------
+
+
+def _write_config(tmp_path, **overrides):
+    settings = {'platform_url': 'https://ems.example.com', 'state_dir': str(tmp_path / 'state'), 'reader': 'disabled'}
+    settings.update(overrides)
+    lines = []
+    for key, value in settings.items():
+        if isinstance(value, bool):
+            lines.append(f'{key} = {"true" if value else "false"}')
+        elif isinstance(value, (int, float)):
+            lines.append(f'{key} = {value}')
+        else:
+            lines.append(f'{key} = "{value}"')
+    path = tmp_path / 'config.toml'
+    path.write_text('\n'.join(lines))
+    return path
+
+
+def _run_cli(monkeypatch, config_path, action, *args, handler=None):
+    if handler is not None:
+        transport = httpx.MockTransport(handler)
+        monkeypatch.setattr(
+            cli_module, 'API',
+            lambda base_url, credentials=None, **kw: API(base_url, credentials, transport=transport),
+        )
+    monkeypatch.setattr(sys, 'argv', ['ems-device', '--config', str(config_path), action, *args])
+    cli_module.main()
+
+
+def test_cli_reset_requires_exact_serial_confirmation(tmp_path, monkeypatch, capsys):
+    config_path = _write_config(tmp_path)
+    state = State(tmp_path / 'state')
+    real_serial = state.identity()['serial_number']
+    state.set('credentials', CREDS)
+    state.close()
+
+    with pytest.raises(SystemExit, match='Refused'):
+        _run_cli(monkeypatch, config_path, 'reset', '--confirm-serial', 'WRONG-SERIAL')
+
+    reopened = State(tmp_path / 'state')
+    assert reopened.get('credentials') == CREDS  # untouched
+    assert reopened.identity()['serial_number'] == real_serial
+    reopened.close()
+
+
+def test_cli_reset_clears_assignment_when_serial_confirmed(tmp_path, monkeypatch, capsys):
+    config_path = _write_config(tmp_path)
+    state = State(tmp_path / 'state')
+    identity = state.identity()
+    state.set('credentials', CREDS)
+    state.close()
+
+    _run_cli(monkeypatch, config_path, 'reset', '--confirm-serial', identity['serial_number'])
+
+    reopened = State(tmp_path / 'state')
+    assert reopened.get('credentials') is None
+    assert reopened.identity()['serial_number'] == identity['serial_number']
+    assert reopened.identity()['activation_code'] != identity['activation_code']
+    reopened.close()
+    out = capsys.readouterr().out
+    assert 'Assignment cleared' in out
+    assert identity['activation_code'] not in out  # old (now-invalid) secret never printed
+
+
+def test_cli_reset_factory_issues_new_identity(tmp_path, monkeypatch):
+    config_path = _write_config(tmp_path)
+    state = State(tmp_path / 'state')
+    identity = state.identity()
+    state.close()
+
+    _run_cli(monkeypatch, config_path, 'reset', '--factory', '--confirm-serial', identity['serial_number'])
+
+    reopened = State(tmp_path / 'state')
+    assert reopened.identity()['serial_number'] != identity['serial_number']
+    reopened.close()
+
+
+def test_cli_rotate_credential_persists_new_secret(tmp_path, monkeypatch):
+    config_path = _write_config(tmp_path)
+    state = State(tmp_path / 'state')
+    state.set('credentials', CREDS)
+    state.set('platform_origin', 'https://ems.example.com')
+    state.close()
+
+    def handler(request):
+        assert request.url.path == '/api/v1/devices/credentials/rotate'
+        return httpx.Response(200, json={'credential_secret': 'brand-new-secret'})
+
+    _run_cli(monkeypatch, config_path, 'rotate-credential', handler=handler)
+
+    reopened = State(tmp_path / 'state')
+    assert reopened.get('credentials')['credential_secret'] == 'brand-new-secret'
+    assert reopened.get('credentials')['device_id'] == CREDS['device_id']
+    assert reopened.get('credential_rotation_pending') is False
+    reopened.close()
+
+
+def test_cli_rotate_credential_leaves_pending_flag_set_on_network_failure(tmp_path, monkeypatch):
+    config_path = _write_config(tmp_path)
+    state = State(tmp_path / 'state')
+    state.set('credentials', CREDS)
+    state.set('platform_origin', 'https://ems.example.com')
+    state.close()
+
+    def handler(request):
+        raise httpx.ConnectError('offline')
+
+    with pytest.raises(SystemExit):
+        _run_cli(monkeypatch, config_path, 'rotate-credential', handler=handler)
+
+    reopened = State(tmp_path / 'state')
+    # Outcome unknown (request may have reached the server before the drop):
+    # the flag survives so 'health' surfaces the ambiguity instead of hiding it.
+    assert reopened.get('credential_rotation_pending') is True
+    assert reopened.get('credentials') == CREDS  # old secret still what we have locally
+    reopened.close()
+
+
+def test_cli_rotate_credential_without_credentials_refuses(tmp_path, monkeypatch):
+    config_path = _write_config(tmp_path)
+    State(tmp_path / 'state').close()
+    with pytest.raises(SystemExit, match='No active credentials'):
+        _run_cli(monkeypatch, config_path, 'rotate-credential')
+
+
+def test_cli_run_raises_distinct_error_type_on_401_without_leaking_message(tmp_path, monkeypatch, caplog):
+    config_path = _write_config(tmp_path)
+    state = State(tmp_path / 'state')
+    state.set('credentials', CREDS)
+    state.set('platform_origin', 'https://ems.example.com')
+    state.close()
+
+    def handler(request):
+        return httpx.Response(401, json={'detail': 'revoked'})
+
+    with pytest.raises(SystemExit):
+        _run_cli(monkeypatch, config_path, 'run', '--once', handler=handler)
+
+    # Only the exception TYPE name is logged -- never text that could carry
+    # a token or response body (see cli.py's outer handler docstring/comment).
+    assert 'CredentialInactiveError' in caplog.text
+    assert 'revoked' not in caplog.text
+    assert CREDS['credential_secret'] not in caplog.text
