@@ -160,11 +160,12 @@ python3 -m venv .venv
 CI verifică Python 3.11 și 3.13. Testele MockTransport, Modbus fake și updater
 mock nu reprezintă validare pe Pi/invertor, power-cut sau integrare cu un server
 web real. Rollback-ul testat local acoperă eșecul verificării systemd, nu o
-întrerupere fizică în timpul schimbării release-ului.
+întrerupere fizică în timpul schimbării release-ului. Bugetele măsurate și
+limitele validării sunt documentate în [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 ## Limite și contracte
 
-Vezi [docs/PROTOCOL.md](docs/PROTOCOL.md) pentru API, semne, coadă, profil și extensiile necesare. Frecvența implicită este 10 secunde, nu timp real garantat. Coada păstrează maximum 17.280 mostre (aproximativ 48 ore la 10 secunde); când este plină, refuză mostre noi, incrementează contorul health și păstrează mostrele vechi. SQLite rulează WAL + `synchronous=FULL`; asta reduce riscul la întreruperea procesului/alimentării, dar nu înlocuiește teste reale cu SD și power-cut. Contractul web per-item permite acum retry selectiv/dead-letter; dead-letter-ul nu are încă retenție automată și trebuie monitorizat prin `health`. Sincronizarea ceasului prin OS/NTP este necesară.
+Vezi [docs/PROTOCOL.md](docs/PROTOCOL.md) pentru API, semne, coadă, profil și extensiile necesare, și [docs/OPERATIONS.md](docs/OPERATIONS.md) pentru actualizări verificate cu rollback, buget de resurse măsurat (dar nu pe Pi) și ce rămâne explicit doar pe hardware real. Frecvența implicită este 10 secunde, nu timp real garantat. Coada păstrează maximum 17.280 mostre (aproximativ 48 ore la 10 secunde); când este plină, refuză mostre noi, incrementează contorul health și păstrează mostrele vechi. SQLite rulează WAL + `synchronous=FULL`; asta reduce riscul la întreruperea procesului/alimentării, dar nu înlocuiește teste reale cu SD și power-cut. Contractul web per-item permite acum retry selectiv/dead-letter; dead-letter-ul nu are încă retenție automată și trebuie monitorizat prin `health`. Sincronizarea ceasului prin OS/NTP este necesară.
 
 Implementările viitoare sunt urmărite prin GitHub issues în acest repo și în EMS-management-platform: self-service claim în web, transfer/factory reset, configurație desired/reported, profil DEYE verificat, contoare/diagnoză și scrieri controlate cu readback.
 

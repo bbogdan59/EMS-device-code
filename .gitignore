@@ -9,5 +9,7 @@ state/
 *.sqlite*
 .env
 config.local.toml
+config.toml
+.idea/
 pytest-of-root/
 tmp*/
