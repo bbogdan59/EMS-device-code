@@ -123,6 +123,10 @@ def test_remote_run_command_cds_into_extracted_repo_dir():
     assert f"cd .ems-configurator/deploy-1/{REPO_ROOT.name}" in command
 
 
+def test_existing_install_detection_uses_atomic_current_release_path():
+    assert AGENT_BIN == "/opt/ems-device/current/.venv/bin/ems-device"
+
+
 # --- fake paramiko SSHClient, for the orchestration logic (no real network) -
 
 

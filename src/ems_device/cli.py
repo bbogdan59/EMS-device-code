@@ -67,10 +67,11 @@ def main():
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     # Held across enrollment and run: no concurrent claims, queue consumers or serial masters.
     lock = (path / "agent.lock").open("a")
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        raise SystemExit("Another agent/enrollment process uses this state directory")
+    if args.action not in ("dead-letter", "health", "identity"):
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SystemExit("Another agent/enrollment process uses this state directory")
     state = State(path)
     api = reader = None
     try:

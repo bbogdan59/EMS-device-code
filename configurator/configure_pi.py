@@ -64,7 +64,7 @@ DEFAULT_AUTODETECT_HOSTS = ("raspberrypi.local", "raspberrypi.lan")
 # `ems-device reset` CLI action (issue #3) remotely, over the same SSH
 # session. No new device-side code: this only orchestrates what a technician
 # would otherwise type by hand.
-AGENT_BIN = "/opt/ems-device/.venv/bin/ems-device"
+AGENT_BIN = "/opt/ems-device/current/.venv/bin/ems-device"
 AGENT_CONFIG = "/etc/ems-device/config.toml"
 AGENT_USER = "ems-device"
 
