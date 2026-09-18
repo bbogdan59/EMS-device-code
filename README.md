@@ -52,6 +52,13 @@ Nu clona `/var/lib/ems-device`: conține secretul unic al unității. O imagine 
 de producție trebuie să lase acel director gol, astfel încât fiecare unitate să
 primească altă identitate la provisioning.
 
+**Alternativ, de pe laptopul tehnicianului, fără SSH manual pe Pi**: vezi
+[configurator/README.md](configurator/README.md) -- un script care se conectează
+prin SSH la Pi (IP autodetectat sau introdus manual, user/parolă), copiază acest
+checkout și rulează `sudo ./run.sh` acolo, relantand seria/Device Code-ul direct
+in terminalul local. Nu reimplementeaza nimic din `run.sh`; e doar un wrapper
+peste exact fluxul manual de mai sus.
+
 ### 2. Client: instalarea acasă
 
 Clientul conectează alimentarea/rețeaua și adaptorul RS485, apoi introduce
