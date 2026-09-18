@@ -70,4 +70,14 @@ din pasul 3 este contractul comun cu `EMS-management-platform#44`. Transferul,
 revocarea/factory reset, identificarea DEYE și desired/reported complet rămân
 work items separate.
 
+## Distribuirea release-urilor
+
+Release-urile nu conțin `/var/lib/ems-device` și sunt instalate sub
+`/opt/ems-device/releases/<version>`. Un manifest minisign verificat leagă
+versiunea de URL-ul HTTPS și SHA-256-ul arhivei. Activarea schimbă atomic
+`/opt/ems-device/current`; serviciul systemd folosește exclusiv acel symlink.
+Un restart urmat de `systemctl is-active` nereușit reactivează release-ul
+anterior. Cheia publică este furnizată explicit operatorului și nu este
+descărcată din același canal cu update-ul.
+
 Nu promite controlul tuturor parametrilor sau aplicare instantanee. Registrele de protecție a rețelei și parametrii instalatorului necesită o politică distinctă. La pierderea cloud-ului, acest subset nu modifică regimul invertorului.
