@@ -34,13 +34,19 @@ un operator il valideaza si il comuta explicit.
 - **Blocurile de citire** (`"blocks"` din profil) acopera STRICT adresele
   individual documentate de sursa de mai sus -- niciun bloc nu "traverseaza"
   registre nedocumentate (ex. 589 intre 588 si 590 e exclus deliberat din
-  orice bloc; vezi testul `test_block_never_reads_past_declared_length`).
+  orice bloc; vezi testele `test_block_never_reads_past_declared_length` si
+  `test_block_cannot_bridge_undeclared_register`). Constructorul respinge si
+  profilele locale care includ goluri, inainte de accesul la magistrala.
 - **Mecanismul de decodare** (u16/s16/u32/s32, ordinea cuvintelor, offset,
   blocuri, campuri calculate, readiness-check) e acoperit de
   `tests/test_readers.py` cu valori sintetice dar realiste, inclusiv un test
   dedicat care incarca EXACT fisierul `deye_sg04lp3_candidate.json` si verifica
   autoconsistenta schemei (fiecare punct acoperit de exact un bloc, fara
-  campuri necunoscute/duplicate, referinte `computed` rezolvabile).
+  campuri necunoscute/duplicate, referinte `computed` rezolvabile). Testele
+  verifica si separarea adreselor FC03/FC04, omisiunea sentinelelor inainte
+  de semn/scalare, lipsa sumelor partiale si flag-urile mostrelor persistate.
+  Verificarea identitatii inainte de telemetrie si dupa reconectare foloseste
+  registre exclusiv sintetice; nu confirma registre de identitate DEYE.
 
 ## Ce NU este confirmat -- verifica obligatoriu pe hardware real inainte de `verified: true`
 
@@ -81,8 +87,8 @@ un operator il valideaza si il comuta explicit.
 6. **Niciun sentinel de indisponibilitate nu e implementat in profilul
    candidat** (ex. o valoare gen `0xFFFF` insemnand "indisponibil" pe vreun
    registru). Sursa comunitara nu documenteaza un asemenea sentinel pentru
-   familia SG04LP3; mecanismul de profil suporta totusi -- vezi mai jos --
-   un camp opozitional viitor daca se confirma unul pe hardware real. Pana
+   familia SG04LP3; mecanismul de profil suporta acum campul optional
+   `unavailable_values`, pentru valori brute confirmate pe hardware real. Pana
    atunci, orice valoare bruta e tratata ca reala, chiar daca ar fi
    neplauzibila (plafonul de plauzibilitate server-side ramane singura plasa
    de siguranta, vezi `docs/LIMITATIONS.md` din EMS-management-platform,
@@ -90,7 +96,10 @@ un operator il valideaza si il comuta explicit.
 7. **`readiness_check` (registrul 500, "Running status") a fost gandit sa
    respinga devreme un profil incompatibil**, dar acceptand orice cod din
    {0,1,2,3,4} conform enum-ului documentat de sursa -- nu a fost niciodata
-   citit dintr-un invertor real in aceasta sesiune.
+   citit dintr-un invertor real in aceasta sesiune. Un asemenea status NU
+   identifica modelul sau firmware-ul. Campul optional `identity_checks`
+   permite comparatii exacte cu registre documentate, dar candidatul nu
+   declara astfel de registre pana la confirmarea adreselor/valorilor.
 
 ## Cum valideaza un operator
 

@@ -1,6 +1,7 @@
 """No write methods. Register addresses must come from an audited model profile."""
 import json
 import math
+from contextlib import suppress
 from pathlib import Path
 
 # Cinci campuri originale v0.1 plus extensiile issue #1 (per-MPPT, per-faza,
@@ -61,14 +62,16 @@ def _decode_point(point, registers):
     encoding = point["encoding"]
     if encoding in ("u16", "s16"):
         raw = registers[address]
-        if encoding == "s16" and raw >= 32768:
-            raw -= 65536
     else:
         low_addr = address if point["word_order"] == "low_high" else address + 1
         high_addr = address + 1 if point["word_order"] == "low_high" else address
         raw = (registers[high_addr] << 16) | registers[low_addr]
-        if encoding == "s32" and raw >= 2**31:
-            raw -= 2**32
+    if raw in point.get("unavailable_values", []):
+        return None
+    if encoding == "s16" and raw >= 32768:
+        raw -= 65536
+    if encoding == "s32" and raw >= 2**31:
+        raw -= 2**32
     return raw * point["scale"] + point["offset"]
 
 
@@ -94,7 +97,7 @@ class ModbusReader:
             names.add(p["field"])
             if type(p["address"]) is not int or not 0 <= p["address"] <= 65535:
                 raise ValueError("Invalid zero-based address")
-            if p["function"] not in {3, 4}:
+            if type(p["function"]) is not int or p["function"] not in {3, 4}:
                 raise ValueError("Only read functions 3/4 supported")
             if p["encoding"] not in _ENCODINGS:
                 raise ValueError("Unsupported encoding")
@@ -104,11 +107,16 @@ class ModbusReader:
                 if p["address"] == 65535:
                     raise ValueError("32-bit point needs a second register in range")
             scale = p["scale"]
-            if not math.isfinite(scale) or scale == 0:
+            if type(scale) not in (int, float) or not math.isfinite(scale) or scale == 0:
                 raise ValueError("Invalid scale")
             offset = p.get("offset", 0)
-            if not math.isfinite(offset):
+            if type(offset) not in (int, float) or not math.isfinite(offset):
                 raise ValueError("Invalid offset")
+            unavailable = p.get("unavailable_values", [])
+            maximum = 2 ** (32 if p["encoding"] in {"u32", "s32"} else 16) - 1
+            if (not isinstance(unavailable, list) or len(unavailable) > 32
+                    or any(type(value) is not int or not 0 <= value <= maximum for value in unavailable)):
+                raise ValueError("unavailable_values must contain unsigned raw values matching the encoding width")
             normalized_points.append({**p, "offset": offset})
         self.points = normalized_points
 
@@ -117,7 +125,9 @@ class ModbusReader:
             if c["field"] not in FIELDS or c["field"] in names:
                 raise ValueError("Unknown or duplicate computed field")
             names.add(c["field"])
-            if not c.get("sum_of") or any(term not in {pt["field"] for pt in self.points} for term in c["sum_of"]):
+            if (not isinstance(c.get("sum_of"), list) or not c["sum_of"]
+                    or any(term not in {pt["field"] for pt in self.points} for term in c["sum_of"])
+                    or len(set(c["sum_of"])) != len(c["sum_of"])):
                 raise ValueError("computed.sum_of must reference defined point fields")
         self.computed = computed
 
@@ -132,27 +142,53 @@ class ModbusReader:
                     raise ValueError(f"Block length must be 1..{MAX_BLOCK_REGISTERS}")
                 if b["start"] + b["length"] - 1 > 65535:
                     raise ValueError("Block exceeds address space")
-                if b["function"] not in {3, 4}:
+                if type(b["function"]) is not int or b["function"] not in {3, 4}:
                     raise ValueError("Only read functions 3/4 supported")
                 for addr in range(b["start"], b["start"] + b["length"]):
-                    if addr in covered:
+                    key = (b["function"], addr)
+                    if key in covered:
                         raise ValueError("Blocks must not overlap")
-                    covered[addr] = b["function"]
+                    covered[key] = True
                 normalized_blocks.append(dict(b))
+            declared = set()
             for p in self.points:
                 needed = [p["address"]] if p["encoding"] in ("u16", "s16") else [p["address"], p["address"] + 1]
                 for addr in needed:
-                    if covered.get(addr) != p["function"]:
+                    declared.add((p["function"], addr))
+                    if (p["function"], addr) not in covered:
                         raise ValueError(f"Point at address {addr} is not covered by any declared block")
+            if set(covered) != declared:
+                raise ValueError("Blocks must not include undeclared registers")
         self.blocks = normalized_blocks if blocks is not None else None
 
         readiness_check = profile.get("readiness_check")
         if readiness_check is not None:
             if readiness_check["field"] not in names:
                 raise ValueError("readiness_check.field must reference a defined point or computed field")
-            if not readiness_check.get("allowed_values"):
+            allowed = readiness_check.get("allowed_values")
+            if (not isinstance(allowed, list) or not allowed
+                    or any(type(value) not in (int, float) or not math.isfinite(value) for value in allowed)):
                 raise ValueError("readiness_check needs a non-empty allowed_values list")
         self.readiness_check = readiness_check
+
+        # Optional exact read-only model/firmware register checks. Values must
+        # come from the operator's audited protocol, never guessed by the agent.
+        identity_checks = profile.get("identity_checks", [])
+        if not isinstance(identity_checks, list) or len(identity_checks) > 16:
+            raise ValueError("identity_checks must contain at most 16 checks")
+        for check in identity_checks:
+            if not isinstance(check, dict) or set(check) != {"function", "address", "expected_registers"}:
+                raise ValueError("invalid identity check")
+            expected = check["expected_registers"]
+            if (type(check["function"]) is not int or check["function"] not in {3, 4}
+                    or type(check["address"]) is not int or not 0 <= check["address"] <= 65535
+                    or not isinstance(expected, list) or not 1 <= len(expected) <= 16
+                    or check["address"] + len(expected) > 65536
+                    or any(type(value) is not int or not 0 <= value <= 65535 for value in expected)):
+                raise ValueError("invalid identity check registers")
+        self.identity_checks = identity_checks
+        self._identity_ready = False
+        self.unavailable_fields = []
 
         self.device_id = config["device_id"]
         if type(self.device_id) is not int or not 1 <= self.device_id <= 247:
@@ -167,44 +203,89 @@ class ModbusReader:
     def _read_registers(self, function, address, count):
         fn = self.client.read_holding_registers if function == 3 else self.client.read_input_registers
         response = fn(address, count=count, device_id=self.device_id)
-        if response.isError() or len(response.registers) != count:
+        if response.isError() or not isinstance(response.registers, list) or len(response.registers) != count:
             raise OSError("modbus_read_failed")
         result = {}
         for offset, raw in enumerate(response.registers):
-            if not 0 <= raw <= 65535:
+            if type(raw) is not int or not 0 <= raw <= 65535:
                 raise ValueError("invalid_register")
             result[address + offset] = raw
         return result
 
-    def read(self):
+    def _connect_and_identify(self):
+        if not getattr(self.client, "connected", False):
+            self._identity_ready = False
         if not self.client.connect():
             raise OSError("serial_unavailable")
-        registers = {}
-        if self.blocks is not None:
-            for block in self.blocks:
-                registers.update(self._read_registers(block["function"], block["start"], block["length"]))
-        else:
-            # v0.1 fallback: un apel Modbus per punct, fara grupare in blocuri.
-            for p in self.points:
-                count = 1 if p["encoding"] in ("u16", "s16") else 2
-                registers.update(self._read_registers(p["function"], p["address"], count))
+        if not self._identity_ready:
+            for check in self.identity_checks:
+                registers = self._read_registers(check["function"], check["address"], len(check["expected_registers"]))
+                if list(registers.values()) != check["expected_registers"]:
+                    raise ValueError("incompatible_identity_registers")
+            self._identity_ready = True
 
-        values = {p["field"]: _decode_point(p, registers) for p in self.points}
+    def _decode(self, points, registers):
+        values = {}
+        for p in points:
+            value = _decode_point(p, registers[p["function"]])
+            if value is not None:
+                values[p["field"]] = value
         for c in self.computed:
-            values[c["field"]] = sum(values[term] for term in c["sum_of"])
+            if all(term in values for term in c["sum_of"]):
+                values[c["field"]] = sum(values[term] for term in c["sum_of"])
         return values
+
+    def read(self):
+        self.unavailable_fields = []
+        try:
+            self._connect_and_identify()
+            # Holding and input registers are independent address spaces.
+            registers = {3: {}, 4: {}}
+            if self.blocks is not None:
+                for block in self.blocks:
+                    registers[block["function"]].update(self._read_registers(block["function"], block["start"], block["length"]))
+            else:
+                for p in self.points:
+                    count = 1 if p["encoding"] in ("u16", "s16") else 2
+                    registers[p["function"]].update(self._read_registers(p["function"], p["address"], count))
+            values = self._decode(self.points, registers)
+            self.unavailable_fields = sorted({p["field"] for p in self.points + self.computed} - set(values))
+            return values
+        except Exception:
+            self._identity_ready = False
+            # Preserve the original read error even if transport cleanup fails.
+            with suppress(Exception):
+                self.client.close()
+            raise
 
     def check_ready(self):
         """O singura citire, INAINTE de a incepe eșantionarea periodica, ca sa
         refuze un profil incompatibil devreme -- fara nicio scanare de
         adrese/baudrate, doar registrele deja declarate in profil."""
-        values = self.read()
-        if self.readiness_check is not None:
-            value = values.get(self.readiness_check["field"])
-            if value not in self.readiness_check["allowed_values"]:
-                raise ValueError(f"incompatible_profile: {self.readiness_check['field']}={value!r}")
+        try:
+            self._connect_and_identify()
+            if self.readiness_check is not None:
+                field = self.readiness_check["field"]
+                needed = {field}
+                for computed in self.computed:
+                    if computed["field"] == field:
+                        needed.update(computed["sum_of"])
+                points = [p for p in self.points if p["field"] in needed]
+                registers = {3: {}, 4: {}}
+                for p in points:
+                    count = 1 if p["encoding"] in ("u16", "s16") else 2
+                    registers[p["function"]].update(self._read_registers(p["function"], p["address"], count))
+                value = self._decode(points, registers).get(field)
+                if value is None or value not in self.readiness_check["allowed_values"]:
+                    raise ValueError(f"incompatible_profile: {field}={value!r}")
+        except Exception:
+            self._identity_ready = False
+            with suppress(Exception):
+                self.client.close()
+            raise
 
     def close(self):
+        self._identity_ready = False
         self.client.close()
 
 
