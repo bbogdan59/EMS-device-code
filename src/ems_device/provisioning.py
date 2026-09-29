@@ -11,6 +11,8 @@ import base64
 import secrets
 import uuid
 
+from .inventory import snapshot
+
 
 def new_serial() -> str:
     """Return a human-readable, random 80-bit inventory serial."""
@@ -47,6 +49,7 @@ def enrollment_payload(identity: dict[str, str], settings: dict) -> dict:
         "serial_number": identity["serial_number"],
         "activation_code": identity["activation_code"],
         "hardware_info": hardware_info,
+        **snapshot(settings),
     }
 
 
@@ -84,13 +87,11 @@ def accept_enrollment_response(state, response: dict) -> str:
             return "assigned"
         raise ValueError("Assigned enrollment response has no bootstrap credential")
 
-    state.set(
-        "credentials",
-        {"device_id": device_id, "station_id": station_id, "credential_secret": secret},
-    )
-    state.set("enrollment_status", "assigned")
     # The customer activation code is one-use. Remove the local copy after a
     # successful assignment; the provisioning secret remains for lifecycle
     # recovery and must never be printed.
-    state.set("activation_code", None)
+    state.set_many({
+        "credentials": {"device_id": device_id, "station_id": station_id, "credential_secret": secret},
+        "enrollment_status": "assigned", "activation_code": None,
+    })
     return "assigned"

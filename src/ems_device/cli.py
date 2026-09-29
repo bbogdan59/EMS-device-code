@@ -18,6 +18,8 @@ from .log_buffer import CompactLogBuffer
 from .readers import DisabledReader, ModbusReader, Simulator
 from .provisioning import accept_enrollment_response, enrollment_payload
 from .state import State
+from .preflight import check as preflight
+from .inventory import snapshot as inventory_snapshot
 
 log = logging.getLogger("ems_device")
 
@@ -45,7 +47,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument(
-        "action", choices=["dead-letter", "health", "identity", "provision", "reset", "rotate-credential", "run"]
+        "action", choices=["dead-letter", "health", "identity", "preflight", "provision", "reset", "rotate-credential", "run"]
     )
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--factory", action="store_true",
@@ -53,6 +55,10 @@ def main():
     parser.add_argument("--confirm-serial",
                         help="required for 'reset': must exactly match the serial printed by 'identity'")
     args = parser.parse_args()
+    if args.action == "preflight":
+        preflight(args.config)
+        print("Preflight passed")
+        return
     os.umask(0o077)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -64,17 +70,22 @@ def main():
     log.addHandler(log_buffer)
     settings = tomllib.loads(args.config.read_text())
     path = Path(settings["state_dir"])
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    read_only = args.action in ("dead-letter", "health", "identity")
+    if not read_only:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
     # Held across enrollment and run: no concurrent claims, queue consumers or serial masters.
-    lock = (path / "agent.lock").open("a")
-    if args.action not in ("dead-letter", "health", "identity"):
+    lock = None
+    if not read_only:
+        lock = (path / "agent.lock").open("a")
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
+            lock.close()
             raise SystemExit("Another agent/enrollment process uses this state directory")
-    state = State(path)
+    state = None
     api = reader = None
     try:
+        state = State(path, read_only=read_only)
         if args.action == "identity":
             identity = state.identity()
             print(f"serial_number={identity['serial_number']}")
@@ -83,6 +94,7 @@ def main():
             return
         if args.action == "health":
             snapshot = state.health_snapshot(agent_version=__version__, clock_sync=_clock_sync_status())
+            snapshot.update(inventory_snapshot(settings))
             snapshot["system_stats"] = system_stats.collect()
             print(json.dumps(snapshot, sort_keys=True))
             return
@@ -135,8 +147,7 @@ def main():
                 )
             credentials = dict(state.get("credentials"))
             credentials["credential_secret"] = new_secret
-            state.set("credentials", credentials)
-            state.set("credential_rotation_pending", False)
+            state.set_many({"credentials": credentials, "credential_rotation_pending": False})
             print("Credential rotated.")
             return
         if args.action == "provision":
@@ -206,7 +217,7 @@ def main():
         interval = settings.get("sample_seconds", 10)
         if type(interval) not in (int, float) or not 5 <= interval <= 3600:
             raise ValueError("sample_seconds must be 5..3600")
-        agent = Agent(state, api, reader, log_buffer)
+        agent = Agent(state, api, reader, log_buffer, settings)
         # Fetch cloud policy before the first serial transaction. A cached policy
         # permits read-only monitoring during an outage; it never enables writes.
         try:
@@ -270,5 +281,7 @@ def main():
             reader.close()
         if api:
             api.close()
-        state.close()
-        lock.close()
+        if state:
+            state.close()
+        if lock:
+            lock.close()

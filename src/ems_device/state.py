@@ -9,9 +9,15 @@ from .provisioning import new_activation_code, new_identity
 
 
 class State:
-    def __init__(self, path: Path, capacity: int = 17280):
+    def __init__(self, path: Path, capacity: int = 17280, *, read_only=False):
         if type(capacity) is not int or capacity < 1:
             raise ValueError("outbox capacity must be a positive integer")
+        self.capacity = capacity
+        self.path = path
+        self.read_only = read_only
+        if read_only:
+            self.db = sqlite3.connect((path / "agent.sqlite").resolve().as_uri() + "?mode=ro", uri=True)
+            return
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(path, 0o700)
         self.db = sqlite3.connect(path / "agent.sqlite")
@@ -32,13 +38,13 @@ class State:
                 reason_code TEXT NOT NULL,
                 failed_at TEXT NOT NULL);
         """)
-        self.capacity = capacity
-        self.path = path
         self._ensure_identity()
         self._secure_database_files()
 
     def _secure_database_files(self):
         """WAL may contain the same secrets as the main DB; protect all files."""
+        if self.read_only:
+            return
         for suffix in ("", "-wal", "-shm"):
             candidate = self.path / f"agent.sqlite{suffix}"
             if candidate.exists():
@@ -52,22 +58,24 @@ class State:
         """
         legacy_identity = self.get("identity")
         identity = self.get("device_identity")
+        changes = {}
         if identity is None:
             identity = new_identity()
             if legacy_identity:
                 identity["installation_uuid"] = legacy_identity
-            self.set("activation_code", identity.pop("activation_code"))
-            self.set("device_identity", identity)
+            changes["activation_code"] = identity.pop("activation_code")
+            changes["device_identity"] = identity
         elif "activation_code" in identity:
             if self.get("activation_code") is None:
-                self.set("activation_code", identity["activation_code"])
+                changes["activation_code"] = identity["activation_code"]
             identity.pop("activation_code")
-            self.set("device_identity", identity)
+            changes["device_identity"] = identity
         if legacy_identity is None:
-            self.set("identity", identity["installation_uuid"])
+            changes["identity"] = identity["installation_uuid"]
         for key in ("installation_uuid", "serial_number", "provisioning_secret"):
             if key not in identity or not identity[key]:
                 raise ValueError(f"Incomplete device identity: {key}")
+        self.set_many(changes)
 
     def identity(self):
         identity = dict(self.get("device_identity"))
@@ -87,11 +95,21 @@ class State:
         code is one-use and may already be consumed or compromised, so a
         fresh one is issued; the installation UUID/serial/provisioning
         secret -- this unit's actual identity -- are untouched."""
-        self.set("credentials", None)
-        self.set("enrollment_status", None)
-        self.set("platform_origin", None)
-        self.set("credential_rotation_pending", False)
-        self.set("activation_code", new_activation_code())
+        changes = {
+            "credentials": None, "enrollment_status": None, "platform_origin": None,
+            "credential_rotation_pending": False, "activation_code": new_activation_code(),
+            "station_config": None, "operational_health": None,
+        }
+        with self.db:
+            # Do not upload the old tenant's backlog under a new assignment.
+            # Retain it locally with an explicit reason rather than losing it.
+            self.db.execute(
+                "INSERT INTO dead_letter(original_outbox_id,payload,reason_code,failed_at) "
+                "SELECT id,payload,'assignment_reset',? FROM outbox",
+                (datetime.now(timezone.utc).isoformat(),),
+            )
+            self.db.execute("DELETE FROM outbox")
+            self._write_settings(changes)
 
     def factory_reset(self):
         """Full reprovisioning for hardware being repurposed for a different
@@ -99,11 +117,14 @@ class State:
         then issue an ENTIRELY NEW device identity so nothing from the
         previous installation is reusable -- same intent as never shipping a
         shared secret in the OS image, applied to an already-installed unit."""
+        identity = new_identity()
+        activation_code = identity.pop("activation_code")
         with self.db:
             self.db.execute("DELETE FROM outbox")
             self.db.execute("DELETE FROM dead_letter")
             self.db.execute("DELETE FROM settings")
-        self._ensure_identity()
+            self._write_settings({"device_identity": identity, "activation_code": activation_code,
+                                  "identity": identity["installation_uuid"]})
         self._secure_database_files()
 
     def get(self, key):
@@ -111,8 +132,16 @@ class State:
         return json.loads(row[0]) if row else None
 
     def set(self, key, value):
+        self.set_many({key: value})
+
+    def _write_settings(self, values):
+        self.db.executemany("INSERT OR REPLACE INTO settings VALUES (?,?)",
+                            [(key, json.dumps(value, allow_nan=False)) for key, value in values.items()])
+
+    def set_many(self, values):
+        """Commit related identity/credential changes as a single transaction."""
         with self.db:
-            self.db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, json.dumps(value, allow_nan=False)))
+            self._write_settings(values)
 
     def _health(self):
         health = {

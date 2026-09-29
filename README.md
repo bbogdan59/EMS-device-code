@@ -49,6 +49,13 @@ la `modbus` se face numai după instalarea unui profil validat pentru modelul ș
 firmware-ul DEYE exact. `git pull && sudo ./run.sh` este doar fluxul manual de
 bootstrap/dezvoltare; fișierul de config și identitatea existentă sunt păstrate.
 
+Update-ul poate fi pornit în timp ce monitorizarea rulează. Installerul
+construiește un release nou cu virtualenv la calea sa definitivă, fără să
+suprascrie fișierele procesului activ. Oprește serviciul înainte de provisioning
+(care cere `agent.lock`), schimbă atomic `current` și repornește monitorizarea.
+La eșec restaurează release-ul anterior și repornește serviciul care era activ.
+Un lock separat, `.update.lock`, exclude instalările/update-urile simultane.
+
 ### Update verificat și rollback
 
 Producția trebuie să publice un `manifest.json` cu exact câmpurile `version`,
@@ -63,10 +70,14 @@ cheia publică minisign dintr-un canal separat și rulează, ca root:
 
 Updaterul refuză HTTP, redirect-uri, manifesturi cu alte câmpuri, hash-uri
 greșite și arhive cu traversal/link-uri. Instalează într-un director nou,
-construiește un virtualenv izolat, execută `health`, apoi schimbă atomic symlink-ul
+construiește un virtualenv izolat, execută `preflight` ca utilizatorul
+`ems-device` (config parse și SQLite read-only, fără RS485/enrollment), apoi schimbă atomic symlink-ul
 `/opt/ems-device/current`. Dacă serviciul nu devine activ, restaurează release-ul
 anterior și îl repornește. Descărcarea periodică nu este activată implicit:
 fereastra de mentenanță și politica de rollout rămân decizia operatorului.
+Verificarea urmărește serviciul timp de cinci secunde; nu este o confirmare
+OTA din partea platformei. Limitele și pașii de recovery sunt în
+[docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 Nu clona `/var/lib/ems-device`: conține secretul unic al unității. O imagine OS
 de producție trebuie să lase acel director gol, astfel încât fiecare unitate să
@@ -91,9 +102,9 @@ sincronizează o fereastră de 15 minute cu tehnicianul.
 Diagnostic sigur, fără afișarea secretelor:
 
 ```sh
-sudo -u ems-device /opt/ems-device/.venv/bin/ems-device --config /etc/ems-device/config.toml identity
-sudo -u ems-device /opt/ems-device/.venv/bin/ems-device --config /etc/ems-device/config.toml health
-sudo -u ems-device /opt/ems-device/.venv/bin/ems-device --config /etc/ems-device/config.toml dead-letter
+sudo -u ems-device /opt/ems-device/current/.venv/bin/ems-device --config /etc/ems-device/config.toml identity
+sudo -u ems-device /opt/ems-device/current/.venv/bin/ems-device --config /etc/ems-device/config.toml health
+sudo -u ems-device /opt/ems-device/current/.venv/bin/ems-device --config /etc/ems-device/config.toml dead-letter
 journalctl -u ems-device -f
 systemctl status ems-device
 ```
@@ -125,16 +136,27 @@ textul răspunsului). Recuperarea e mereu manuală, cerută explicit de
 operator, niciodată automată:
 
 ```sh
+sudo systemctl stop ems-device
+# alege DOAR una dintre cele doua variante de reset de mai jos
 # elibereaza asocierea curenta (transfer catre alta statie/platforma);
 # identitatea fizica (serial/UUID) ramane neschimbata, un Device Code nou e emis
-sudo -u ems-device /opt/ems-device/.venv/bin/ems-device --config /etc/ems-device/config.toml \
+sudo -u ems-device /opt/ems-device/current/.venv/bin/ems-device --config /etc/ems-device/config.toml \
   reset --confirm-serial EMS-XXXX-XXXX-XXXX
 
-# reprovizionare completa (hardware repus in circuit pentru alt client):
+# SAU reprovizionare completa (hardware repus in circuit pentru alt client):
 # emite o identitate noua in intregime, sterge coada/dead-letter locale
-sudo -u ems-device /opt/ems-device/.venv/bin/ems-device --config /etc/ems-device/config.toml \
+sudo -u ems-device /opt/ems-device/current/.venv/bin/ems-device --config /etc/ems-device/config.toml \
   reset --factory --confirm-serial EMS-XXXX-XXXX-XXXX
+# dupa varianta aleasa:
+sudo systemctl start ems-device
 ```
+
+Configuratorul oprește automat monitorizarea înainte de reset și o repornește
+inclusiv la eșec. Pentru comenzile manuale, oprește serviciul înainte de reset.
+Un soft reset mută outbox-ul vechii stații în dead-letter (`assignment_reset`)
+și elimină politica din cache în aceeași tranzacție cu credentialele; datele
+vechi nu sunt încărcate în stația următoare. Factory reset șterge complet
+istoricul local.
 
 `--confirm-serial` trebuie să fie EXACT serialul afișat de `identity` -- fără
 potrivire exactă, comanda refuză și nu schimbă nimic. După `reset`, urmatorul

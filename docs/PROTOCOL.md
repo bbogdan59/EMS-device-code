@@ -75,6 +75,14 @@ Primul profil candidat cu extensiile de mai sus, `profiles/deye_sg04lp3_candidat
 5. Serverul livrează configurația versionată. Modul `disabled` rămâne sigur
    până la disponibilitatea unui profil DEYE validat.
 
+Inventarul aplicației folosește câmpurile deja existente din contractul
+platformei #168 (inspectat la `030a8245cd92bcdf8bafc49adf60f572bc4d095e`):
+`agent_version` la enrollment, `firmware_version` la heartbeat, plus `build_id`,
+`hardware_platform`, `architecture`, `os_version` la ambele. `health` expune
+aceleași observații. `firmware_version` este versiunea aplicației EMS, nu a
+invertorului. Nu sunt trimise câmpuri OTA inventate; polling-ul/confirmarea
+ofertelor fleet rămân urmărite în device #13.
+
 Pașii 1, 2, 4 și modul sigur sunt implementați în agent. Claim-ul self-service
 din pasul 3 este contractul comun cu `EMS-management-platform#44`. Identificarea
 DEYE (issue #1) și desired/reported complet rămân work items separate.
@@ -101,7 +109,9 @@ server, ceas nesincronizat -- nu trebuie să distrugă o asociere încă validă
   `platform_origin` local, emite un Device Code nou (cel vechi e deja
   consumat/compromis), PĂSTREAZĂ `installation_uuid`/`serial_number`/
   `provisioning_secret` -- aceeași unitate fizică, gata de re-enrollment către
-  o stație (sau chiar un `platform_url`) nou.
+  o stație (sau chiar un `platform_url`) nou. În aceeași tranzacție se șterge
+  politica stației din cache și se mută outbox-ul în dead-letter cu motivul
+  `assignment_reset`; backlog-ul nu poate trece la tenantul următor.
 - `reset --factory` (`State.factory_reset`) e pentru hardware repus în
   circuit pentru alt client: șterge și coada/dead-letter locale și emite o
   identitate COMPLET nouă -- nimic din instalarea anterioară nu mai e
@@ -130,8 +140,12 @@ Release-urile nu conțin `/var/lib/ems-device` și sunt instalate sub
 `/opt/ems-device/releases/<version>`. Un manifest minisign verificat leagă
 versiunea de URL-ul HTTPS și SHA-256-ul arhivei. Activarea schimbă atomic
 `/opt/ems-device/current`; serviciul systemd folosește exclusiv acel symlink.
-Un restart urmat de `systemctl is-active` nereușit reactivează release-ul
-anterior. Cheia publică este furnizată explicit operatorului și nu este
+Preflight-ul deschide SQLite read-only ca `ems-device`, fără lock exclusiv,
+enrollment sau RS485. Venv-ul nu este mutat după creare. Un restart urmat de
+verificări `systemctl is-active` timp de cinci secunde nereușite reactivează
+release-ul anterior; aceasta nu este confirmarea OTA din noul proces.
+Installerul, reset-ul configuratorului și updaterul exclud concurența printr-un
+lock de deployment separat de lock-ul agentului. Cheia publică este furnizată explicit operatorului și nu este
 descărcată din același canal cu update-ul.
 
 Nu promite controlul tuturor parametrilor sau aplicare instantanee. Registrele de protecție a rețelei și parametrii instalatorului necesită o politică distinctă. La pierderea cloud-ului, acest subset nu modifică regimul invertorului.
