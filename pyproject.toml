@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ems-device"
-version = "0.1.1"
+version = "0.1.2"
 description = "Read-only EMS edge agent with durable telemetry and platform v1 client"
 requires-python = ">=3.11"
 dependencies = ["httpx==0.28.1", "pymodbus[serial]==3.11.3"]

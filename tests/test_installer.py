@@ -87,6 +87,9 @@ def installer(tmp_path):
     (source / 'src/ems_device').mkdir(parents=True)
     (source / 'deploy').mkdir()
     (source / 'deploy/ems-device.service').write_text('service')
+    for name in ('ems-device-update-watchdog.service', 'ems-device-update-watchdog.timer'):
+        (source / 'deploy' / name).write_text('watchdog unit')
+    (source / 'src/ems_device/update_watchdog.py').write_text('# standalone helper')
     (source / 'src/ems_device/__init__.py').write_text('# new code')
     (source / 'pyproject.toml').write_text('# project')
     script = source / 'run.sh'
@@ -109,7 +112,7 @@ def installer(tmp_path):
     environment = dict(os.environ, PATH=str(commands) + os.pathsep + os.environ['PATH'],
                        INSTALL_TEST_ROOT=str(tmp_path), EMS_INSTALL_DIR=str(tmp_path / 'opt'),
                        EMS_CONFIG_DIR=str(tmp_path / 'config'), EMS_STATE_DIR=str(tmp_path / 'state'),
-                       EMS_SYSTEMD_DIR=str(tmp_path / 'systemd'))
+                       EMS_SYSTEMD_DIR=str(tmp_path / 'systemd'), EMS_HELPER_DIR=str(tmp_path / 'helper'))
 
     def run(failure=''):
         return subprocess.run(['sh', str(script)], env=dict(environment, INSTALL_TEST_FAIL=failure),

@@ -55,6 +55,52 @@ Release-urile nu sunt șterse automat. Păstrează întotdeauna țintele `curren
 și `previous`; eliberează doar release-uri vechi după verificarea manuală a
 monitorizării. Un release semnat deja prezent este refuzat, nu suprascris.
 
+### Confirmare și watchdog independent (agent 0.1.2+)
+
+`run.sh` instalează helper-ul root-owned, exclusiv stdlib, în
+`/usr/local/lib/ems-device/update_watchdog.py`, separat de `current` și de
+virtualenv-ul aplicației. Timer-ul `ems-device-update-watchdog.timer` rulează
+la 15 secunde și după boot; nu descarcă și nu instalează release-uri automat.
+Updaterul semnat refuză activarea dacă timer-ul nu este activ.
+
+Înainte de switch se scrie și se sincronizează pe disc un jurnal cu attempt ID,
+release țintă/anterior, versiune, boot OS și deadline monotonic. Jurnalul și
+symlink-urile folosesc replace atomic plus fsync pe director. După switch,
+`ems-device-update` raportează activare în așteptarea confirmării, nu succes.
+Agentul publică un fișier local `runtime-health.json` (0600) numai după contact
+reușit cu platforma: pending enrollment sau config+heartbeat pentru assigned.
+Release-ul procesului este capturat la import, înainte ca `current` să poată fi
+schimbat de un updater concurent.
+
+Watchdog-ul verifică attempt ID, release, versiune, boot_id nou, boot OS,
+timestamp monotonic proaspăt și PID-ul MainPID al serviciului activ. Fișierele
+health sunt limitate la 64 KiB și trebuie să fie fișiere normale, fără symlink.
+Lipsa confirmării în 120 secunde, reboot-ul înainte de confirmare sau activarea
+întreruptă restaurează release-ul anterior. O întrerupere în timpul rollback-ului
+lasă intenția în jurnal și următorul tick o reia. Eșecul restartului anterior
+rămâne vizibil ca `rollback_failed`, cu motiv sanitizat; este necesară recuperare
+manuală. Noul update/installer este refuzat cât timp un update cere recovery.
+După repararea release-ului anterior, operatorul poate reîncerca explicit:
+`sudo /usr/bin/python3 -I /usr/local/lib/ems-device/update_watchdog.py --retry-rollback`.
+Update-ul semnat cere o instalare bootstrap existentă; prima instalare folosește
+`run.sh`, astfel încât să existe întotdeauna o țintă de rollback.
+
+`ems-device ... health` afișează `update.current`, `previous`, `phase`,
+`attempt_id`, `version` și `last_error`. Diagnostic root suplimentar:
+
+```sh
+sudo systemctl status ems-device-update-watchdog.timer
+sudo journalctl -u ems-device-update-watchdog.service
+```
+
+Timer-ul validează local contactul noului proces cu platforma; nu implementează
+încă raportarea/confirmarea deployment-ului fleet. Contractul platformei #168
+semnează artifactul, dar oferta curentă nu include manifestul semnat cu
+compatibilitate/build/protocol și nu oferă retry idempotent pentru evenimentele
+intermediare ori evenimente autentificate de la device-uri pending. Aceste
+extensii trebuie coordonate înainte de automatizarea fleet; nu sunt simulate
+prin endpoint-uri inventate.
+
 ### Stadiu P0 #13 / #3 și limite de validare
 
 Versiunea aplicației EMS are o singură sursă (`pyproject.toml`, PEP 440) și este
@@ -74,14 +120,15 @@ cache-ul stației în aceeași tranzacție cu credentialele; nu transmite datele
 vechii stații către o nouă asociere.
 
 Acesta rămâne un updater inițiat de operator. #13 rămâne deschis pentru
-contractul fleet OTA (oferte/confirmare din noul proces), helper/watchdog
-independent, replay/downgrade policy, artifact offline cu dependențe complete și
-recuperare automată după power-cut/SIGKILL. Cinci secunde de `is-active` nu sunt
-o confirmare de health sau de conectivitate la platformă. #3 mai are validarea
-lifecycle cu platforma reală și recuperarea rotației pierdute. Nu s-au rulat
-systemd real, power-cut pe SD, SSH pe Pi sau invertor fizic; #1/#2 rămân
-condiționate de profilul și validarea hardware. Scrierile în invertor rămân
-dezactivate.
+contractul fleet OTA (oferte și evenimente/confirmare către platformă), politici
+replay/downgrade, artifact offline și validarea pe Pi. Testele de proces folosesc
+`os._exit` înainte/după switch și în timpul rollback-ului; verifică recuperarea
+jurnalului, nu comportamentul electric al unui SD la power-cut. Watchdog-ul este
+testat ca script independent de mediul aplicației, cu systemd izolat în teste.
+#3 mai are validarea lifecycle cu platforma reală și recuperarea rotației pierdute.
+Nu s-au rulat systemd real pe Pi, power-cut pe SD, SSH pe Pi sau invertor fizic;
+#1/#2 rămân condiționate de profilul și validarea hardware. Scrierile în invertor
+rămân dezactivate.
 
 ## Buget de resurse (măsurat, dar NU pe Raspberry Pi)
 

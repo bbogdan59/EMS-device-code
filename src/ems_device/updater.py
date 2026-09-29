@@ -15,9 +15,12 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import tomllib
 from urllib.parse import urlparse
 
 import httpx
+
+from . import update_watchdog as watchdog
 
 MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
 MAX_EXTRACT_BYTES = 256 * 1024 * 1024
@@ -82,10 +85,11 @@ def _safe_extract(archive: Path, destination: Path) -> None:
 
 
 def _replace_link(link: Path, target: Path) -> None:
-    temporary = link.with_name(f".{link.name}.new")
-    temporary.unlink(missing_ok=True)
-    temporary.symlink_to(target)
-    os.replace(temporary, link)
+    watchdog.replace_link(link, target)
+
+
+def _state_directory(config):
+    return Path(tomllib.loads(config.read_text())["state_dir"])
 
 
 def _check_service(service: str) -> None:
@@ -110,6 +114,15 @@ def install_update(
 
 
 def _install_update(manifest_url, public_key, install_dir, config, service):
+    if service != "ems-device.service":
+        raise ValueError("only ems-device.service is supported by the recovery helper")
+    try:
+        prior = watchdog.read_json(install_dir / watchdog.JOURNAL)
+    except FileNotFoundError:
+        prior = None
+    if prior and prior.get("phase") not in {"confirmed", "rolled_back"}:
+        raise ValueError("previous update requires confirmation or recovery")
+    state_dir = _state_directory(config)
     install_dir.mkdir(parents=True, exist_ok=True)
     releases = install_dir / "releases"
     releases.mkdir(mode=0o755, exist_ok=True)
@@ -118,6 +131,8 @@ def _install_update(manifest_url, public_key, install_dir, config, service):
     if current.exists() and not current.is_symlink():
         raise ValueError("current must be a release symlink")
     previous = current.resolve(strict=True) if current.is_symlink() else None
+    if previous is None:
+        raise ValueError("bootstrap installation required before signed updates")
     with tempfile.TemporaryDirectory(prefix="ems-update-") as temporary:
         workspace = Path(temporary)
         manifest_path = workspace / "manifest.json"
@@ -156,24 +171,38 @@ def _install_update(manifest_url, public_key, install_dir, config, service):
             _run([str(release / ".venv/bin/pip"), "install", "--disable-pip-version-check", str(release)])
             _run(["runuser", "-u", "ems-device", "--", str(release / ".venv/bin/ems-device"),
                   "--config", str(config), "preflight"])
+            _run(["systemctl", "is-active", "--quiet", "ems-device-update-watchdog.timer"])
         except BaseException:
             shutil.rmtree(release, ignore_errors=True)
             raise
 
+    record = watchdog.begin(install_dir, release, previous, version, state_dir)
     try:
         if previous is not None:
             _replace_link(install_dir / "previous", previous)
         _replace_link(current, release)
+        record["phase"] = "awaiting_confirmation"
+        watchdog.atomic_json(install_dir / watchdog.JOURNAL, record)
         _run(["systemctl", "restart", service])
         _check_service(service)
     except BaseException:
-        if previous is not None:
-            _replace_link(current, previous)
-            _run(["systemctl", "restart", service])
-            _check_service(service)
-        else:
-            _run(["systemctl", "stop", service])
-            current.unlink(missing_ok=True)
+        record.update(phase="rolling_back", last_error="activation_failed")
+        watchdog.atomic_json(install_dir / watchdog.JOURNAL, record)
+        try:
+            if previous is not None:
+                _replace_link(current, previous)
+                _run(["systemctl", "restart", service])
+                _check_service(service)
+                record["phase"] = "rolled_back"
+            else:
+                _run(["systemctl", "stop", service])
+                current.unlink(missing_ok=True)
+                record.update(phase="rollback_failed", last_error="no_previous_release")
+        except Exception:
+            record.update(phase="rollback_failed", last_error="rollback_start_failed")
+            raise
+        finally:
+            watchdog.atomic_json(install_dir / watchdog.JOURNAL, record)
         raise
     return version
 
@@ -189,4 +218,5 @@ def main() -> None:
     def interrupted(signum, _frame):
         raise SystemExit(128 + signum)
     signal.signal(signal.SIGTERM, interrupted)
-    print(install_update(args.manifest_url, args.public_key, install_dir=args.install_dir, config=args.config))
+    version = install_update(args.manifest_url, args.public_key, install_dir=args.install_dir, config=args.config)
+    print(f"Activated {version}; awaiting confirmation from the new process")

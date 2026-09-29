@@ -143,7 +143,13 @@ versiunea de URL-ul HTTPS și SHA-256-ul arhivei. Activarea schimbă atomic
 Preflight-ul deschide SQLite read-only ca `ems-device`, fără lock exclusiv,
 enrollment sau RS485. Venv-ul nu este mutat după creare. Un restart urmat de
 verificări `systemctl is-active` timp de cinci secunde nereușite reactivează
-release-ul anterior; aceasta nu este confirmarea OTA din noul proces.
+release-ul anterior. Jurnalul root-owned `update-state.json` este persistat
+înainte de switch. Watchdog-ul separat confirmă numai un PID systemd activ cu
+boot_id nou, release și versiune exacte și dovadă de contact reușit cu platforma
+din acel proces. Pending enrollment poate confirma după un răspuns autorizat
+pending; un device asociat confirmă după config și heartbeat reușite.
+Timeout-ul monotonic de 120 secunde sau schimbarea boot-ului OS înainte de
+confirmare produc rollback. Evenimentele fleet ale platformei rămân separate.
 Installerul, reset-ul configuratorului și updaterul exclud concurența printr-un
 lock de deployment separat de lock-ul agentului. Cheia publică este furnizată explicit operatorului și nu este
 descărcată din același canal cu update-ul.
