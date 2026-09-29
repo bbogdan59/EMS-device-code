@@ -130,6 +130,18 @@ Nu s-au rulat systemd real pe Pi, power-cut pe SD, SSH pe Pi sau invertor fizic;
 #1/#2 rămân condiționate de profilul și validarea hardware. Scrierile în invertor
 rămân dezactivate.
 
+Reader-ul respinge blocuri care includ registre nedeclarate și păstrează
+separat adresele FC03/FC04. Dacă un profil auditat declară `unavailable_values`,
+punctele indisponibile și sumele care depind de ele lipsesc din mostră și apar
+în `quality_flags.unavailable_fields`; zero măsurat rămâne zero. O citire complet
+indisponibilă produce eroare de eșantionare, fără a încărca o mostră inventată.
+Opțional, `identity_checks` verifică registre exacte de model/firmware înainte
+de telemetrie și după reconectare. Eșecul produce `incompatible_identity_registers`;
+verifică profilul și unitatea conectată înainte de a modifica valorile așteptate.
+Profilul candidat livrat nu conține valori de identitate/sentinele presupuse.
+Aceste mecanisme sunt testate prin transport simulat și SQLite real, fără
+validare electrică pe magistrala unui invertor.
+
 ## Buget de resurse (măsurat, dar NU pe Raspberry Pi)
 
 Măsurătorile de mai jos vin dintr-un container de dezvoltare x86-64, NU de

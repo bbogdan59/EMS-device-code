@@ -73,6 +73,9 @@ class Agent:
                     "measured_at": datetime.now(timezone.utc).isoformat(), **values,
                     "quality_flags": {"simulated": self.reader.simulated},
                     "raw_payload": {"reader": type(self.reader).__name__}}
+            unavailable = getattr(self.reader, "unavailable_fields", [])
+            if unavailable:
+                item["quality_flags"]["unavailable_fields"] = list(unavailable)
             self.state.enqueue(item)
             self.sequence += 1
             self._record_success("sample")
