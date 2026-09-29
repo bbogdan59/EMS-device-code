@@ -1,0 +1,11 @@
+[Unit]
+Description=Check EMS update confirmation and recover interrupted updates
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=15
+AccuracySec=1
+Unit=ems-device-update-watchdog.service
+
+[Install]
+WantedBy=timers.target

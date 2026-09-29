@@ -5,16 +5,17 @@ from datetime import datetime, timezone
 from . import __version__, system_stats
 from .readers import FIELDS, SIGNED_FIELDS
 from .inventory import snapshot
+from .runtime_health import record_contact
 
 log = logging.getLogger(__name__)
 
 
 class Agent:
-    def __init__(self, state, api, reader, log_buffer=None, settings=None):
+    def __init__(self, state, api, reader, log_buffer=None, settings=None, boot_id=None):
         self.state, self.api, self.reader = state, api, reader
         self.log_buffer = log_buffer
         self.inventory = snapshot(settings)
-        self.boot_id = str(uuid.uuid4())  # new process, persistent queued items retain old boot IDs
+        self.boot_id = boot_id or str(uuid.uuid4())  # queued items retain old boot IDs
         self.sequence = 0
 
     def _record_success(self, operation):
@@ -48,6 +49,10 @@ class Agent:
                                  "simulated": self.reader.simulated},
                 "system_stats": system_stats.collect()})
             self._record_success("config")
+            try:
+                record_contact(self.state.path, self.boot_id)
+            except Exception as exc:
+                log.warning("runtime_health_failed type=%s", type(exc).__name__)
         except Exception as exc:
             self._record_error("config", exc)
             raise

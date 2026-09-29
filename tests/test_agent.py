@@ -860,3 +860,19 @@ def test_read_only_state_refuses_writes_and_does_not_generate_an_identity(tmp_pa
     with pytest.raises(sqlite3.OperationalError, match='readonly'):
         diagnostic.set('credentials', CREDS)
     diagnostic.close()
+
+
+def test_failed_heartbeat_cannot_confirm_an_update(tmp_path):
+    from ems_device.update_watchdog import HEALTH
+    state = State(tmp_path)
+    def handler(request):
+        if request.url.path.endswith('/config'):
+            return httpx.Response(200, json={'station_id': CREDS['station_id'], 'execution_mode': 'shadow',
+                                            'config_version': 1, 'preference_version': 1})
+        return httpx.Response(401, json={'detail': 'revoked'})
+    api = API('https://ems.example.com', CREDS, transport=httpx.MockTransport(handler))
+    with pytest.raises(httpx.HTTPStatusError):
+        Agent(state, api, DisabledReader()).sync()
+    assert not (tmp_path / HEALTH).exists()
+    state.close()
+    api.close()

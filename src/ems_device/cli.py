@@ -9,6 +9,7 @@ import signal
 import threading
 import time
 import tomllib
+import uuid
 import httpx
 from . import __version__
 from . import system_stats
@@ -20,6 +21,8 @@ from .provisioning import accept_enrollment_response, enrollment_payload
 from .state import State
 from .preflight import check as preflight
 from .inventory import snapshot as inventory_snapshot
+from .runtime_health import record_contact
+from .update_watchdog import inspect_update
 
 log = logging.getLogger("ems_device")
 
@@ -95,6 +98,7 @@ def main():
         if args.action == "health":
             snapshot = state.health_snapshot(agent_version=__version__, clock_sync=_clock_sync_status())
             snapshot.update(inventory_snapshot(settings))
+            snapshot["update"] = inspect_update()
             snapshot["system_stats"] = system_stats.collect()
             print(json.dumps(snapshot, sort_keys=True))
             return
@@ -171,6 +175,7 @@ def main():
             return
 
         stop = threading.Event()
+        process_boot_id = str(uuid.uuid4())
         signal.signal(signal.SIGTERM, lambda *_: stop.set())
         signal.signal(signal.SIGINT, lambda *_: stop.set())
         enrollment_failures = 0
@@ -183,6 +188,10 @@ def main():
                 if status == "assigned":
                     api.credentials = state.get("credentials")
                     break
+                try:
+                    record_contact(path, process_boot_id)
+                except Exception as exc:
+                    log.warning("runtime_health_failed type=%s", type(exc).__name__)
                 enrollment_failures = 0
                 delay = 30
             except httpx.HTTPStatusError as exc:
@@ -217,7 +226,7 @@ def main():
         interval = settings.get("sample_seconds", 10)
         if type(interval) not in (int, float) or not 5 <= interval <= 3600:
             raise ValueError("sample_seconds must be 5..3600")
-        agent = Agent(state, api, reader, log_buffer, settings)
+        agent = Agent(state, api, reader, log_buffer, settings, process_boot_id)
         # Fetch cloud policy before the first serial transaction. A cached policy
         # permits read-only monitoring during an outage; it never enables writes.
         try:

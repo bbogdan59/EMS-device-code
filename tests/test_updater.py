@@ -10,8 +10,9 @@ from ems_device import updater
 
 
 @pytest.fixture(autouse=True)
-def no_service_wait(monkeypatch):
+def no_service_wait(monkeypatch, tmp_path):
     monkeypatch.setattr(updater.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(updater, "_state_directory", lambda config: tmp_path / "state")
 
 
 def _bundle(path: Path, unsafe=False):
@@ -43,6 +44,9 @@ def test_verified_update_activates_release(monkeypatch, tmp_path):
     commands = []
     monkeypatch.setattr(updater, "_run", lambda command: commands.append(command))
     install = tmp_path / "opt"
+    old = install / "releases/old"
+    old.mkdir(parents=True)
+    (install / "current").symlink_to(old)
     version = updater.install_update("https://updates.example/manifest.json", "RWtrusted", install_dir=install,
                                      config=tmp_path / "config.toml")
     assert version == "0.2.0"
@@ -228,3 +232,14 @@ def test_download_is_bounded_with_or_without_content_length(monkeypatch, tmp_pat
     monkeypatch.setattr(updater.httpx, 'Client', lambda **kw: client_class(**kw, transport=httpx.MockTransport(handler)))
     with pytest.raises(ValueError, match='size'):
         updater._download('https://updates.example/manifest', tmp_path / 'manifest.json')
+
+
+def test_activation_is_pending_until_new_process_confirms(monkeypatch, tmp_path, release_download):
+    monkeypatch.setattr(updater, '_run', lambda command: None)
+    install = tmp_path / 'opt'
+    updater.install_update('https://u/m', 'key', install_dir=install)
+    saved = updater.watchdog.read_json(install / updater.watchdog.JOURNAL)
+    assert saved['phase'] == 'awaiting_confirmation'
+    assert saved['previous'] == str(install / 'releases/old')
+    with pytest.raises(ValueError, match='confirmation or recovery'):
+        updater.install_update('https://u/m', 'key', install_dir=install)

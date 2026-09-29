@@ -75,8 +75,13 @@ construiește un virtualenv izolat, execută `preflight` ca utilizatorul
 `/opt/ems-device/current`. Dacă serviciul nu devine activ, restaurează release-ul
 anterior și îl repornește. Descărcarea periodică nu este activată implicit:
 fereastra de mentenanță și politica de rollout rămân decizia operatorului.
-Verificarea urmărește serviciul timp de cinci secunde; nu este o confirmare
-OTA din partea platformei. Limitele și pașii de recovery sunt în
+Verificarea inițială urmărește serviciul timp de cinci secunde. Update-ul rămâne
+`awaiting_confirmation` până când watchdog-ul independent verifică noul proces,
+release-ul/versiunea așteptate și un contact reușit cu platforma. Deadline-ul
+local este 120 secunde; un timeout sau reboot înainte de confirmare declanșează
+rollback. Rulează `run.sh` o dată pentru instalarea helper-ului și timer-ului;
+release-urile țintă trebuie să implementeze confirmarea (agent 0.1.2+).
+Această confirmare locală nu trimite încă evenimente fleet OTA. Limitele și pașii de recovery sunt în
 [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 Nu clona `/var/lib/ems-device`: conține secretul unic al unității. O imagine OS

@@ -1,0 +1,21 @@
+[Unit]
+Description=Confirm or recover an EMS application update
+After=ems-device.service
+ConditionPathExists=/opt/ems-device/update-state.json
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 -I /usr/local/lib/ems-device/update_watchdog.py
+TimeoutStartSec=300
+UMask=0022
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/ems-device
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true

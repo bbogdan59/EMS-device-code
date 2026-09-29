@@ -15,6 +15,7 @@ STATE_DIR=${EMS_STATE_DIR:-/var/lib/ems-device}
 CONFIG_FILE="$CONFIG_DIR/config.toml"
 PLATFORM_URL=${EMS_PLATFORM_URL:-}
 SYSTEMD_DIR=${EMS_SYSTEMD_DIR:-/etc/systemd/system}
+HELPER_DIR=${EMS_HELPER_DIR:-/usr/local/lib/ems-device}
 
 if [ -z "$PLATFORM_URL" ] && [ ! -f "$CONFIG_FILE" ]; then
     echo "Set EMS_PLATFORM_URL once, for example:" >&2
@@ -29,6 +30,9 @@ exec 9>"$INSTALL_DIR/.update.lock"
 if ! flock -n 9; then
     echo "Another installation/update is already running" >&2
     exit 1
+fi
+if [ -e "$INSTALL_DIR/update-state.json" ]; then
+    python3 "$SCRIPT_DIR/src/ems_device/update_watchdog.py" --install-dir "$INSTALL_DIR" --check-idle
 fi
 
 apt-get update
@@ -120,7 +124,13 @@ chmod 0640 "$CONFIG_FILE"
 runuser -u ems-device -- "$BOOTSTRAP/.venv/bin/ems-device" --config "$CONFIG_FILE" preflight
 
 install -m 0644 "$SCRIPT_DIR/deploy/ems-device.service" "$SYSTEMD_DIR/ems-device.service"
+install -d -m 0755 "$HELPER_DIR"
+install -m 0644 "$SCRIPT_DIR/src/ems_device/update_watchdog.py" "$HELPER_DIR/update_watchdog.py.new"
+mv -f "$HELPER_DIR/update_watchdog.py.new" "$HELPER_DIR/update_watchdog.py"
+install -m 0644 "$SCRIPT_DIR/deploy/ems-device-update-watchdog.service" "$SYSTEMD_DIR/ems-device-update-watchdog.service"
+install -m 0644 "$SCRIPT_DIR/deploy/ems-device-update-watchdog.timer" "$SYSTEMD_DIR/ems-device-update-watchdog.timer"
 systemctl daemon-reload
+systemctl enable --now ems-device-update-watchdog.timer
 
 # Stop even an inactive/auto-restarting service, so it cannot reacquire the
 # agent lock between this check and provisioning. Register recovery first.
