@@ -4,8 +4,8 @@ Runs on your laptop, not on the Pi. It does exactly what the manual
 technician flow in the main `README.md` does -- package this checkout,
 copy it to the Pi, run `sudo ./run.sh` there -- so you never have to
 `git clone`/SSH onto the unit yourself. It does not reimplement any install
-logic: `run.sh`/`deploy/update.sh` remain the single source of truth, so
-this tool automatically gets their smoke-test/rollback behavior too.
+logic: `run.sh` remains the single source of truth, so
+this tool gets its startup-check and rollback behavior too.
 
 ## Use
 
@@ -41,7 +41,7 @@ output a technician sitting at the Pi would), and on success prints a
 summary with the serial and Device Code pulled straight out of `run.sh`'s
 own output -- nothing is invented if a line isn't found.
 
-Re-running is safe: it's the same idempotent `run.sh`/`deploy/update.sh`
+Re-running is safe: it's the same idempotent `run.sh`
 flow, so this doubles as your remote-update tool (`git pull` locally, then
 re-run the configurator) and gets its automatic rollback-on-failure for
 free.
@@ -51,14 +51,18 @@ free.
 If the configurator finds an existing install on the target Pi (i.e. this
 isn't the first run), it prints the current serial/enrollment status and
 offers a reset **before** reconfiguring, reusing the device's own `ems-device
-reset` CLI action (issue #3) -- nothing new is added on the device side:
+reset` CLI action (issue #3). It takes the deployment lock, stops monitoring
+(including a service waiting to auto-restart), runs the reset as `ems-device`,
+and restores previously active monitoring even if reset fails:
 
 - **[n] none** (default) -- keep the current assignment and identity, just
   update the software. Use this for routine updates on a device that's
   already claimed by a customer.
 - **[s] soft** -- clears the station assignment and issues a new Device
-  Code, but keeps the same serial/identity. Use this to take a returned/
-  unclaimed unit back to "ready to ship" without wiping its history.
+  Code, but keeps the same serial/identity. Cached station policy is removed
+  and queued readings are quarantined in local dead-letter storage with reason
+  `assignment_reset`, so they cannot be sent to the next station. Server-side
+  release of an existing assignment is still a separate operator action.
 - **[f] factory** -- wipes everything (identity, outbox, dead-letter) and
   issues a brand new serial and Device Code. Use this only when repurposing
   hardware for an unrelated customer. This is destructive and irreversible;
@@ -75,10 +79,10 @@ whose reset didn't actually happen.
    fingerprint so you can cross-check `ssh-keygen -lf /etc/ssh/ssh_host_*_key.pub`
    on the Pi yourself if you're on a network you don't fully trust).
 2. Packages this local checkout into an in-memory tar.gz, excluding
-   `.git`, `.venv`, `__pycache__`, `*.egg-info`, `build/`, `.pytest_cache`
-   (the `build/` exclusion matters: a stale one caused a real staleness bug
-   fixed in `deploy/update.sh` for issue #4 -- never ship one from your own
-   dev checkout either).
+   `.git`, virtualenvs, caches, build outputs, nested worktrees, local
+   `config.toml`/`.env` files, SQLite databases and symlinks. When available,
+   the checkout commit is captured as application build metadata before
+   excluding `.git`.
 3. Uploads it via SFTP to `~/.ems-configurator/deploy-<timestamp>/` on the
    Pi and extracts it there.
 4. Runs `sudo ./run.sh` in that extracted copy, over a pty, feeding the
@@ -116,8 +120,8 @@ configurator/.venv/bin/pip install -r configurator/requirements-test.txt
 configurator/.venv/bin/python -m pytest configurator/tests/ -v
 ```
 
-No real SSH/hardware in tests -- they cover the pure logic (tar exclusion
-patterns, `run.sh` output parsing, remote command construction) that
-doesn't need a live connection. Nothing here validates an actual SSH
+Tests cover archive filtering, output parsing, shell quoting, and execution
+of the generated stop/reset/restart shell against isolated service commands.
+They also exercise restart recovery when reset or stop fails. Nothing here validates an actual SSH
 session against a real Pi; that remains a manual verification step for
 whoever uses this tool for the first time on real hardware.

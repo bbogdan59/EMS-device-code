@@ -8,7 +8,7 @@ this tool's own dependency, paramiko, never reaches the Pi). It does exactly
 what a technician would do by hand: package this checkout, copy it to the
 Pi, run `sudo ./run.sh` there, and relay the output (including the serial
 and Device Code) back to this terminal. It does not reimplement any install
-logic -- `run.sh`/`deploy/update.sh` remain the single source of truth, so
+logic -- `run.sh` remains the single source of truth, so
 this tool automatically gets their smoke-test/rollback behavior for free.
 
 Usage:
@@ -29,7 +29,9 @@ import getpass
 import io
 import os
 import posixpath
+import shlex
 import socket
+import subprocess
 import sys
 import tarfile
 import time
@@ -48,6 +50,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # transfer one from the technician's own dev checkout either.
 TAR_EXCLUDE_PATTERNS = (
     ".git", ".git/*",
+    ".worktrees", ".worktrees/*", ".env", ".env.*", "config.toml",
+    "*.sqlite", "*.sqlite-*", "*.db", "*.db-*",
     ".venv", ".venv/*", "venv", "venv/*",
     "__pycache__", "*/__pycache__", "*/__pycache__/*",
     "*.egg-info", "*/*.egg-info", "*/*.egg-info/*",
@@ -83,15 +87,35 @@ def should_exclude(relative_path: str) -> bool:
 def build_tarball(repo_root: Path) -> bytes:
     """Packages the checkout into an in-memory tar.gz, excluding local-only
     artifacts (see TAR_EXCLUDE_PATTERNS). Returns the raw bytes."""
+    build_id = None
+    if (repo_root / ".git").exists():
+        try:
+            build_id = subprocess.check_output(["git", "-C", str(repo_root), "rev-parse", "--verify", "HEAD"],
+                                               text=True, stderr=subprocess.DEVNULL).strip()
+            if subprocess.check_output(["git", "-C", str(repo_root), "status", "--porcelain", "--untracked-files=no"],
+                                       text=True, stderr=subprocess.DEVNULL):
+                build_id += "-dirty"
+        except (OSError, subprocess.CalledProcessError):
+            build_id = None
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-        for path in sorted(repo_root.rglob("*")):
-            relative = path.relative_to(repo_root).as_posix()
-            if should_exclude(relative):
-                continue
-            if path.is_dir():
-                continue
-            tar.add(path, arcname=relative)
+        for directory, subdirs, files in os.walk(repo_root, followlinks=False):
+            base = Path(directory)
+            subdirs[:] = sorted(name for name in subdirs if not (base / name).is_symlink()
+                               and not should_exclude((base / name).relative_to(repo_root).as_posix()))
+            for name in sorted(files):
+                path = base / name
+                relative = path.relative_to(repo_root).as_posix()
+                if build_id and relative == "src/ems_device/build_id.txt":
+                    continue
+                if not should_exclude(relative) and not path.is_symlink():
+                    tar.add(path, arcname=relative)
+        if build_id:
+            payload = (build_id + "\n").encode()
+            info = tarfile.TarInfo("src/ems_device/build_id.txt")
+            info.size = len(payload)
+            info.mode = 0o644
+            tar.addfile(info, io.BytesIO(payload))
     return buffer.getvalue()
 
 
@@ -130,8 +154,9 @@ def parse_run_sh_output(output: str) -> dict:
 
 
 def remote_run_command(staging_dir: str, platform_url: str) -> str:
-    env_prefix = f'EMS_PLATFORM_URL="{platform_url}" ' if platform_url else ""
-    return f"sudo -S -p '' bash -c 'cd {posixpath.join(staging_dir, REPO_ROOT.name)} && {env_prefix}./run.sh'"
+    env_prefix = f"EMS_PLATFORM_URL={shlex.quote(platform_url)} " if platform_url else ""
+    script = f"cd {shlex.quote(posixpath.join(staging_dir, REPO_ROOT.name))} && {env_prefix}./run.sh"
+    return "sudo -S -p '' sh -c " + shlex.quote(script)
 
 
 def remote_agent_command(action: str, extra_args: str = "") -> str:
@@ -145,8 +170,33 @@ def remote_agent_command(action: str, extra_args: str = "") -> str:
 def remote_reset_command(mode: str, confirm_serial: str) -> str:
     """`mode` is 'soft' or 'factory' (never 'none' -- callers only invoke
     this once a reset was actually requested)."""
+    if mode not in {"soft", "factory"}:
+        raise ValueError("reset mode must be soft or factory")
     factory_flag = " --factory" if mode == "factory" else ""
-    return remote_agent_command("reset", f"--confirm-serial {confirm_serial}{factory_flag}")
+    # One root shell holds the deployment lock and owns stop/reset/recovery.
+    # EXIT preserves reset's status; INT/TERM exit through the same recovery.
+    script = f"""set -eu
+exec 9>/opt/ems-device/.update.lock
+flock -n 9
+was_active=0
+case "$(systemctl show -p ActiveState --value ems-device)" in
+    active|activating|reloading) was_active=1 ;;
+esac
+resume_monitoring() {{
+    result=$?
+    trap - EXIT INT TERM
+    if [ "$was_active" -eq 1 ]; then
+        systemctl start ems-device || result=1
+    fi
+    exit "$result"
+}}
+trap resume_monitoring EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+systemctl stop ems-device
+runuser -u {AGENT_USER} -- {AGENT_BIN} --config {AGENT_CONFIG} reset --confirm-serial {shlex.quote(confirm_serial)}{factory_flag}
+"""
+    return "sudo -S -p '' sh -c " + shlex.quote(script)
 
 
 def parse_identity_output(output: str) -> dict:

@@ -783,3 +783,80 @@ def test_cli_run_raises_distinct_error_type_on_401_without_leaking_message(tmp_p
     assert 'CredentialInactiveError' in caplog.text
     assert 'revoked' not in caplog.text
     assert CREDS['credential_secret'] not in caplog.text
+
+
+def test_reset_quarantines_previous_tenant_backlog_and_clears_cached_policy(tmp_path):
+    state = State(tmp_path)
+    state.set('credentials', CREDS)
+    state.set('station_config', {'station_id': CREDS['station_id'], 'execution_mode': 'live'})
+    item = {'boot_id': 'previous-tenant', 'sequence': 1, 'pv_power_w': 123}
+    state.enqueue(item)
+    state.clear_assignment()
+    assert state.pending() == []
+    assert state.get('station_config') is None
+    assert state.dead_letters()[0]['reason_code'] == 'assignment_reset'
+    stored = state.db.execute('SELECT payload FROM dead_letter').fetchone()[0]
+    assert json.loads(stored) == item
+    state.close()
+
+
+@pytest.mark.parametrize('operation', ['clear_assignment', 'factory_reset', 'assignment'])
+def test_interrupted_lifecycle_transaction_preserves_original_state(tmp_path, operation):
+    import sqlite3
+    state = State(tmp_path)
+    state.set('credentials', CREDS)
+    state.set('station_config', {'station_id': CREDS['station_id']})
+    state.set('platform_origin', 'https://old.example.com')
+    state.enqueue({'boot_id': 'old', 'sequence': 1})
+    original = list(state.db.execute('SELECT * FROM settings ORDER BY key'))
+    state.db.executescript('''
+        CREATE TRIGGER interrupted_change BEFORE INSERT ON settings
+        WHEN NEW.key = 'activation_code'
+        BEGIN SELECT RAISE(ABORT, 'simulated storage failure'); END;
+    ''')
+    with pytest.raises(sqlite3.IntegrityError, match='simulated storage failure'):
+        if operation == 'assignment':
+            accept_enrollment_response(state, {'status': 'assigned', **CREDS, 'credential_secret': 'new'})
+        else:
+            getattr(state, operation)()
+    assert list(state.db.execute('SELECT * FROM settings ORDER BY key')) == original
+    assert state.pending()[0][1] == {'boot_id': 'old', 'sequence': 1}
+    assert state.dead_letters() == []
+    state.close()
+    reopened = State(tmp_path)
+    assert reopened.get('credentials') == CREDS
+    assert reopened.get('platform_origin') == 'https://old.example.com'
+    reopened.close()
+
+
+@pytest.mark.parametrize('action', ['identity', 'health', 'dead-letter', 'preflight'])
+def test_live_diagnostics_do_not_mutate_state_or_take_agent_lock(tmp_path, monkeypatch, action):
+    import fcntl
+    config_path = _write_config(tmp_path)
+    state = State(tmp_path / 'state')
+    state.set('credentials', CREDS)
+    state.enqueue({'boot_id': 'live', 'sequence': 1})
+    before = list(state.db.iterdump())
+    with (tmp_path / 'state/agent.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _run_cli(monkeypatch, config_path, action)
+    assert list(state.db.iterdump()) == before
+    state.close()
+
+
+def test_preflight_does_not_create_unprovisioned_state(tmp_path, monkeypatch):
+    config_path = _write_config(tmp_path)
+    _run_cli(monkeypatch, config_path, 'preflight')
+    assert not (tmp_path / 'state').exists()
+
+
+def test_read_only_state_refuses_writes_and_does_not_generate_an_identity(tmp_path):
+    import sqlite3
+    state = State(tmp_path)
+    identity = state.identity()
+    state.close()
+    diagnostic = State(tmp_path, read_only=True)
+    assert diagnostic.identity() == identity
+    with pytest.raises(sqlite3.OperationalError, match='readonly'):
+        diagnostic.set('credentials', CREDS)
+    diagnostic.close()

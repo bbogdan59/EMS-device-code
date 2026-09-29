@@ -108,7 +108,7 @@ def test_parse_run_sh_output_update_run_has_no_device_code():
 
 def test_remote_run_command_includes_platform_url_only_when_given():
     with_url = remote_run_command(".ems-configurator/deploy-1", "https://ems.example.com")
-    assert 'EMS_PLATFORM_URL="https://ems.example.com"' in with_url
+    assert 'EMS_PLATFORM_URL=https://ems.example.com' in with_url
     assert "./run.sh" in with_url
 
     without_url = remote_run_command(".ems-configurator/deploy-1", "")
@@ -339,3 +339,81 @@ def test_perform_reset_factory_mode_passes_factory_flag():
     exit_status, _output = perform_reset(client, "hunter2", "factory", "EMS-1")
     assert exit_status == 0
     assert "--factory" in client.commands[0]
+
+
+def test_tarball_excludes_worktrees_local_config_and_symlinks(tmp_path):
+    repo = tmp_path / 'repo'
+    (repo / '.worktrees/other-project').mkdir(parents=True)
+    (repo / '.worktrees/other-project/credentials').write_text('private')
+    (repo / 'config.toml').write_text('local configuration')
+    (repo / '.env').write_text('secret')
+    (repo / 'agent.sqlite').write_text('device secrets')
+    (repo / 'agent.sqlite-wal').write_text('device secrets')
+    (repo / 'config.example.toml').write_text('example')
+    external = tmp_path / 'private'
+    external.write_text('private')
+    (repo / 'linked-file').symlink_to(external)
+    with tarfile.open(fileobj=io.BytesIO(build_tarball(repo)), mode='r:gz') as archive:
+        assert archive.getnames() == ['config.example.toml']
+
+
+def test_remote_platform_url_is_literal_shell_data(tmp_path, monkeypatch):
+    import os
+    import shlex
+    import subprocess
+    import configure_pi
+    checkout = tmp_path / 'checkout'
+    checkout.mkdir()
+    script = checkout / 'run.sh'
+    script.write_text('#!/bin/sh\nprintf "%s" "$EMS_PLATFORM_URL"\n')
+    script.chmod(0o755)
+    monkeypatch.setattr(configure_pi, 'REPO_ROOT', checkout)
+    payload = 'https://example.com/$(touch INJECTED);\'"`touch INJECTED`'
+    command = remote_run_command(str(tmp_path), payload)
+    inner = shlex.split(command)[-1]
+    result = subprocess.run(['sh', '-c', inner], cwd=tmp_path, capture_output=True, text=True, env=os.environ)
+    assert result.returncode == 0
+    assert result.stdout == payload
+    assert not (checkout / 'INJECTED').exists()
+
+
+@pytest.mark.parametrize('failure,initial_state', [('', 'active'), ('reset', 'active'),
+                                                  ('stop', 'active'), ('', 'activating'), ('', 'inactive')])
+def test_remote_reset_stops_monitor_and_restores_service_on_success_or_failure(tmp_path, failure, initial_state):
+    import os
+    import shlex
+    import subprocess
+    commands = tmp_path / 'bin'
+    commands.mkdir()
+    stub = commands / 'stub'
+    stub.write_text(f'#!{sys.executable}\n' + r'''
+import fcntl, os, sys
+from pathlib import Path
+root = Path(os.environ['RESET_TEST_ROOT'])
+name = Path(sys.argv[0]).name
+args = sys.argv[1:]
+fail = os.environ['RESET_TEST_FAIL']
+if name == 'flock':
+    fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+elif name == 'systemctl':
+    if args[0] == 'show': print(os.environ['RESET_TEST_STATE'])
+    if args[0] == 'stop':
+        (root / 'stopped').touch()
+        if fail == 'stop': sys.exit(9)
+    if args[0] == 'start': (root / 'started').touch()
+elif name == 'runuser':
+    assert (root / 'stopped').exists(), 'reset attempted while monitoring still running'
+    (root / 'reset').touch()
+    if fail == 'reset': sys.exit(9)
+''')
+    stub.chmod(0o755)
+    for name in ('flock', 'systemctl', 'runuser'):
+        (commands / name).symlink_to(stub)
+    command = remote_reset_command('soft', 'EMS-ABCD')
+    inner = shlex.split(command)[-1].replace('/opt/ems-device/.update.lock', shlex.quote(str(tmp_path / 'update.lock')))
+    environment = dict(os.environ, PATH=str(commands) + os.pathsep + os.environ['PATH'],
+                       RESET_TEST_ROOT=str(tmp_path), RESET_TEST_FAIL=failure, RESET_TEST_STATE=initial_state)
+    result = subprocess.run(['sh', '-c', inner], env=environment, capture_output=True, text=True, timeout=10)
+    assert result.returncode == (9 if failure else 0), result.stderr
+    assert (tmp_path / 'started').exists() == (initial_state != 'inactive')
+    assert (tmp_path / 'reset').exists() == (failure != 'stop')

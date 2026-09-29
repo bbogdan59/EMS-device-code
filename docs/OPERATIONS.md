@@ -2,19 +2,86 @@
 
 ## Actualizări verificate cu rollback
 
-Mecanismul canonic este `ems-device-update`, documentat în README. Manifestul
-este verificat cu cheia publică minisign fixată de operator, iar arhiva este
-verificată SHA-256 înainte de extracție. Fiecare release primește propriul
-virtualenv sub `/opt/ems-device/releases/<version>`; după testul local `health`,
-symlink-ul `/opt/ems-device/current` este schimbat atomic. Dacă serviciul nu
-devine activ după restart, updaterul reactivează release-ul anterior și îl
-repornește.
+Update-urile pot porni cu monitorizarea activă. `run.sh` creează un director
+`releases/bootstrap.<id>` nou pentru fiecare instalare; updaterul semnat folosește
+`releases/<version>`. Virtualenv-ul se construiește direct la calea definitivă:
+mutarea lui după instalare ar invalida shebang-urile scripturilor Python.
 
-`tests/test_updater.py` acoperă verificarea/activarea, rollback-ul la eșecul
-systemd și respingerea traversal-ului din arhivă. Testele folosesc mock-uri și
-nu înlocuiesc o întrerupere fizică de alimentare pe Pi. `git pull && sudo
-./run.sh` rămâne numai fluxul manual de bootstrap/dezvoltare, nu canalul de
-update pentru producție.
+Ambele fluxuri iau `/opt/ems-device/.update.lock`, separat de `agent.lock`.
+Descărcarea și build-ul lasă monitorizarea activă. `preflight` rulează ca
+`ems-device`, verifică configurația și SQLite prin `mode=ro`, fără să creeze
+identitate, să migreze schema ori să deschidă RS485. `health`, `identity` și
+`dead-letter` deschid și ele baza read-only și pot rula în timpul monitorizării.
+
+Installerul oprește serviciul înainte de `provision`, inclusiv dacă systemd
+pregătește un auto-restart. Recovery-ul este înregistrat înainte de stop.
+După activare, serviciul trebuie să rămână activ la cinci verificări la o
+secundă distanță. La eșec, `current` revine la release-ul anterior, iar serviciul
+este repornit. `previous` păstrează ținta anterioară. Configurația, identitatea,
+credentialele și outbox-ul rămân în directoarele persistente.
+
+Updaterul operatorului verifică minisign înainte de a folosi manifestul și
+SHA-256 înainte de extracție. HTTPS nu urmează redirect-uri și ignoră proxy-urile
+din mediu. Limite: manifest/semnătură 64 KiB fiecare, arhivă 64 MiB, extracție
+256 MiB și 4.096 intrări; minimum 512 MiB liberi pe filesystem-ul release-urilor.
+Arhivele cu traversal, link-uri, fișiere speciale, setuid/setgid, virtualenv
+preconstruit sau bază SQLite a device-ului sunt refuzate.
+
+### Recovery local
+
+Dacă un update manual eșuează, inspectează `journalctl -u ems-device` și
+`readlink -f /opt/ems-device/current`. Nu șterge `agent.lock`: unlink-ul unui
+lock activ permite unui alt proces să creeze un inode nou și să pornească un
+al doilea master. Un proces pornit manual trebuie oprit de operator înainte de
+provisioning/reset; installerul controlează serviciul systemd, nu procese arbitrare.
+
+Pentru revenire explicită la `previous`, după verificarea release-ului dorit:
+
+```sh
+sudo sh -c '
+set -eu
+exec 9>/opt/ems-device/.update.lock
+flock -n 9
+previous=$(readlink -f /opt/ems-device/previous)
+test -x "$previous/.venv/bin/ems-device"
+ln -sfn "$previous" /opt/ems-device/.current.new
+mv -Tf /opt/ems-device/.current.new /opt/ems-device/current
+systemctl restart ems-device
+systemctl is-active --quiet ems-device
+'
+```
+
+Release-urile nu sunt șterse automat. Păstrează întotdeauna țintele `current`
+și `previous`; eliberează doar release-uri vechi după verificarea manuală a
+monitorizării. Un release semnat deja prezent este refuzat, nu suprascris.
+
+### Stadiu P0 #13 / #3 și limite de validare
+
+Versiunea aplicației EMS are o singură sursă (`pyproject.toml`, PEP 440) și este
+citită din metadata pachetului instalat. Enrollment-ul pending și heartbeat-ul
+linked trimit aceeași versiune, build Git (când disponibil), hardware platform,
+arhitectură și versiune OS. Acestea nu sunt versiunea firmware-ului DEYE.
+Valorile necunoscute sunt omise. La un checkout modificat build-ul are sufixul
+`-dirty`; o arhivă fără build metadata nu primește un commit inventat.
+
+Testele locale rulează shell-ul real al installerului cu comenzi OS/systemd
+izolate și un proces real care ține `flock`; verifică eliberarea lock-ului,
+rollback-ul și păstrarea identității/configurației. Un test de updater creează
+un virtualenv real și execută scriptul după activare. Alte teste simulează
+HTTP/signing/systemd, disk-full și întreruperi ale tranzacțiilor SQLite.
+Reset-ul soft mută vechea coadă în dead-letter (`assignment_reset`) și șterge
+cache-ul stației în aceeași tranzacție cu credentialele; nu transmite datele
+vechii stații către o nouă asociere.
+
+Acesta rămâne un updater inițiat de operator. #13 rămâne deschis pentru
+contractul fleet OTA (oferte/confirmare din noul proces), helper/watchdog
+independent, replay/downgrade policy, artifact offline cu dependențe complete și
+recuperare automată după power-cut/SIGKILL. Cinci secunde de `is-active` nu sunt
+o confirmare de health sau de conectivitate la platformă. #3 mai are validarea
+lifecycle cu platforma reală și recuperarea rotației pierdute. Nu s-au rulat
+systemd real, power-cut pe SD, SSH pe Pi sau invertor fizic; #1/#2 rămân
+condiționate de profilul și validarea hardware. Scrierile în invertor rămân
+dezactivate.
 
 ## Buget de resurse (măsurat, dar NU pe Raspberry Pi)
 

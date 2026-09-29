@@ -4,14 +4,16 @@ import uuid
 from datetime import datetime, timezone
 from . import __version__, system_stats
 from .readers import FIELDS, SIGNED_FIELDS
+from .inventory import snapshot
 
 log = logging.getLogger(__name__)
 
 
 class Agent:
-    def __init__(self, state, api, reader, log_buffer=None):
+    def __init__(self, state, api, reader, log_buffer=None, settings=None):
         self.state, self.api, self.reader = state, api, reader
         self.log_buffer = log_buffer
+        self.inventory = snapshot(settings)
         self.boot_id = str(uuid.uuid4())  # new process, persistent queued items retain old boot IDs
         self.sequence = 0
 
@@ -41,6 +43,7 @@ class Agent:
             self.state.set("station_config", config)
             self.api.call("POST", "/devices/heartbeat", {
                 "boot_id": self.boot_id, "firmware_version": __version__,
+                **{key: value for key, value in self.inventory.items() if key != "agent_version"},
                 "capabilities": {"telemetry": self.reader.telemetry_available, "inverter_write": False,
                                  "simulated": self.reader.simulated},
                 "system_stats": system_stats.collect()})
