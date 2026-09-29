@@ -23,6 +23,7 @@ from .preflight import check as preflight
 from .inventory import snapshot as inventory_snapshot
 from .runtime_health import record_contact
 from .update_watchdog import inspect_update
+from . import hardware_identity
 
 log = logging.getLogger("ems_device")
 
@@ -94,11 +95,14 @@ def main():
             print(f"serial_number={identity['serial_number']}")
             print(f"installation_uuid={identity['installation_uuid']}")
             print(f"enrollment_status={state.get('enrollment_status') or 'new'}")
+            for key, value in hardware_identity.status(state.get("hardware_identity"), hardware_identity.observe()).items():
+                print(f"hardware_{key}={value if value is not None else 'unknown'}")
             return
         if args.action == "health":
             snapshot = state.health_snapshot(agent_version=__version__, clock_sync=_clock_sync_status())
             snapshot.update(inventory_snapshot(settings))
             snapshot["update"] = inspect_update()
+            snapshot["hardware_identity"] = hardware_identity.status(state.get("hardware_identity"), hardware_identity.observe())
             snapshot["system_stats"] = system_stats.collect()
             print(json.dumps(snapshot, sort_keys=True))
             return
@@ -120,15 +124,17 @@ def main():
                     + (" and issues a brand new device identity." if args.factory else ".")
                 )
             if args.factory:
-                state.factory_reset()
+                state.factory_reset(hardware_identity=hardware_identity.observe())
                 identity = state.identity()
                 print(f"Factory reset complete. New serial: {identity['serial_number']}")
             else:
+                state.bind_hardware(hardware_identity.observe())
                 state.clear_assignment()
                 identity = state.identity()
                 print(f"Assignment cleared. Serial unchanged: {identity['serial_number']}")
             print(f"New device code (keep sealed until next setup): {identity['activation_code']}")
             return
+        state.bind_hardware(hardware_identity.observe())
         api = API(settings["platform_url"], state.get("credentials"))
         bound_origin = state.get("platform_origin")
         if bound_origin and bound_origin != api.origin:
@@ -136,6 +142,8 @@ def main():
         if args.action == "rotate-credential":
             if not state.get("credentials"):
                 raise SystemExit("No active credentials to rotate; enroll first")
+            if state.get("credential_rotation_pending"):
+                raise SystemExit("Previous credential rotation has an unknown outcome; operator recovery is required")
             # Set BEFORE the network call: if the response never arrives (crash,
             # network drop after the server already processed it), this flag
             # survives to the next run/health check instead of silently

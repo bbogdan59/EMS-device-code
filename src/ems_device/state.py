@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .provisioning import new_activation_code, new_identity
+from .hardware_identity import HardwareIdentityError
 
 
 class State:
@@ -84,6 +85,16 @@ class State:
             identity["activation_code"] = activation_code
         return identity
 
+    def bind_hardware(self, observed):
+        bound = self.get("hardware_identity")
+        if bound is not None:
+            if observed is None:
+                raise HardwareIdentityError("bound_hardware_unavailable")
+            if bound != observed:
+                raise HardwareIdentityError("hardware_identity_mismatch")
+        elif observed is not None:
+            self.set("hardware_identity", observed)
+
     def clear_assignment(self):
         """Release the current station/platform binding without changing the
         physical device's identity (issue #3: transfer, reprovisioning to a
@@ -111,7 +122,7 @@ class State:
             self.db.execute("DELETE FROM outbox")
             self._write_settings(changes)
 
-    def factory_reset(self):
+    def factory_reset(self, *, hardware_identity=None):
         """Full reprovisioning for hardware being repurposed for a different
         customer/operator (issue #3): wipe the queue and every local secret,
         then issue an ENTIRELY NEW device identity so nothing from the
@@ -124,7 +135,7 @@ class State:
             self.db.execute("DELETE FROM dead_letter")
             self.db.execute("DELETE FROM settings")
             self._write_settings({"device_identity": identity, "activation_code": activation_code,
-                                  "identity": identity["installation_uuid"]})
+                                  "identity": identity["installation_uuid"], "hardware_identity": hardware_identity})
         self._secure_database_files()
 
     def get(self, key):

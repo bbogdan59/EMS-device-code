@@ -155,3 +155,38 @@ lock de deployment separat de lock-ul agentului. Cheia publică este furnizată 
 descărcată din același canal cu update-ul.
 
 Nu promite controlul tuturor parametrilor sau aplicare instantanee. Registrele de protecție a rețelei și parametrii instalatorului necesită o politică distinctă. La pierderea cloud-ului, acest subset nu modifică regimul invertorului.
+
+## Identitate hardware și imagini clonate (P0 #3)
+
+Serialul public `EMS-...` rămâne aleator, generat local o singură dată; nu este
+credential și nu se schimbă la upgrade sau soft reset. Pe Raspberry Pi,
+agentul citește modelul și serialul din Device Tree (`/sys/firmware/devicetree/base`
+sau `/proc/device-tree`). Sursa serialului este documentată de
+[Raspberry Pi](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html).
+Serialul hex este normalizat și hash-uit cu un prefix de sursă; fingerprint-ul
+public este salvat separat de secretele de provisioning.
+
+La prima rulare pe o unitate existentă fără binding, fingerprint-ul observat
+este adoptat fără a schimba serialul/UUID-ul sau credentialele. Ulterior,
+`provision`, `run`, rotația și soft reset verifică binding-ul înainte de orice
+apel API ori acces RS485. Un fingerprint diferit sau dispariția unei surse deja
+legate produce `HardwareIdentityError` și păstrează starea pentru diagnostic.
+`identity`/`health` afișează `matched`, `mismatch`, `unbound` sau `unavailable`,
+plus fingerprint-urile publice, fără secrete.
+
+Hardware-ul fără o sursă suportată păstrează identitatea software unică și
+raportează `unavailable`; nu deducem hardware din hostname, MAC sau machine-id.
+Nu există attestation/secure element: un operator root poate falsifica metadatele,
+iar o clonă făcută înainte de primul binding nu poate fi recunoscută retrospectiv.
+Imaginile OS trebuie în continuare livrate fără `/var/lib/ems-device`.
+
+Mutarea intenționată a SD-ului către altă placă necesită `reset --factory
+--confirm-serial <serial>`, cu serviciul oprit. Aceasta schimbă toate secretele,
+șterge datele vechi și leagă noua identitate de placa observată într-o singură
+tranzacție. Soft reset păstrează binding-ul și nu permite reutilizarea secretelor
+unei imagini clonate. Seria absentă pe o placă deja legată cere repararea sursei
+hardware sau reprovisioning explicit, nu regenerare automată de identitate.
+
+O rotație cu rezultat necunoscut nu mai poate fi retrimisă prin aceeași comandă;
+`credential_rotation_pending` cere intervenție. Recuperarea idempotentă a
+secretului după un răspuns pierdut necesită încă extensia contractului platformei.

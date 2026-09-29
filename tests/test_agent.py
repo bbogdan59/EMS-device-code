@@ -876,3 +876,86 @@ def test_failed_heartbeat_cannot_confirm_an_update(tmp_path):
     assert not (tmp_path / HEALTH).exists()
     state.close()
     api.close()
+
+
+@pytest.mark.parametrize('action', ['provision', 'run', 'rotate-credential'])
+def test_cloned_device_state_never_reaches_network_or_reader(tmp_path, monkeypatch, action):
+    import shutil
+    original = State(tmp_path / 'original')
+    identity = original.identity()
+    original.set('credentials', CREDS)
+    original.set('platform_origin', 'https://ems.example.com')
+    original.bind_hardware({'source': 'raspberry_pi_serial', 'fingerprint': 'board-A'})
+    original.enqueue({'boot_id': 'original', 'sequence': 1})
+    original.close()
+    shutil.copytree(tmp_path / 'original', tmp_path / 'state')
+    config = _write_config(tmp_path)
+    monkeypatch.setattr(cli_module.hardware_identity, 'observe',
+                        lambda: {'source': 'raspberry_pi_serial', 'fingerprint': 'board-B'})
+    monkeypatch.setattr(cli_module, 'API', lambda *a, **kw: pytest.fail('cloned credential reached API'))
+    monkeypatch.setattr(cli_module, 'ModbusReader', lambda *a: pytest.fail('cloned device opened RS485'))
+    with pytest.raises(SystemExit):
+        _run_cli(monkeypatch, config, action, '--once')
+    clone = State(tmp_path / 'state')
+    assert clone.identity() == identity
+    assert clone.get('credentials') == CREDS
+    assert clone.pending()[0][1]['boot_id'] == 'original'
+    clone.close()
+
+
+def test_confirmed_factory_reset_recovers_clone_with_new_identity(tmp_path, monkeypatch):
+    config = _write_config(tmp_path)
+    state = State(tmp_path / 'state')
+    old = state.identity()
+    state.set('credentials', CREDS)
+    state.bind_hardware({'source': 'raspberry_pi_serial', 'fingerprint': 'board-A'})
+    state.close()
+    new_board = {'source': 'raspberry_pi_serial', 'fingerprint': 'board-B'}
+    monkeypatch.setattr(cli_module.hardware_identity, 'observe', lambda: new_board)
+    _run_cli(monkeypatch, config, 'reset', '--factory', '--confirm-serial', old['serial_number'])
+    state = State(tmp_path / 'state')
+    assert state.get('hardware_identity') == new_board
+    assert state.get('credentials') is None
+    assert state.identity()['serial_number'] != old['serial_number']
+    state.close()
+
+
+def test_soft_reset_cannot_reuse_cloned_provisioning_secret(tmp_path, monkeypatch):
+    config = _write_config(tmp_path)
+    state = State(tmp_path / 'state')
+    old = state.identity()
+    state.bind_hardware({'source': 'raspberry_pi_serial', 'fingerprint': 'board-A'})
+    state.close()
+    monkeypatch.setattr(cli_module.hardware_identity, 'observe',
+                        lambda: {'source': 'raspberry_pi_serial', 'fingerprint': 'board-B'})
+    with pytest.raises(SystemExit):
+        _run_cli(monkeypatch, config, 'reset', '--confirm-serial', old['serial_number'])
+    state = State(tmp_path / 'state')
+    assert state.identity() == old
+    state.close()
+
+
+def test_unknown_rotation_outcome_cannot_be_retried_blindly(tmp_path, monkeypatch):
+    config = _write_config(tmp_path)
+    state = State(tmp_path / 'state')
+    state.set('credentials', CREDS)
+    state.set('credential_rotation_pending', True)
+    state.close()
+    with pytest.raises(SystemExit, match='unknown outcome'):
+        _run_cli(monkeypatch, config, 'rotate-credential',
+                 handler=lambda request: pytest.fail('ambiguous rotation was retried'))
+
+
+def test_identity_diagnostic_reports_mismatch_without_secrets(tmp_path, monkeypatch, capsys):
+    config = _write_config(tmp_path)
+    state = State(tmp_path / 'state')
+    identity = state.identity()
+    state.bind_hardware({'source': 'raspberry_pi_serial', 'fingerprint': 'board-A'})
+    state.close()
+    monkeypatch.setattr(cli_module.hardware_identity, 'observe',
+                        lambda: {'source': 'raspberry_pi_serial', 'fingerprint': 'board-B'})
+    _run_cli(monkeypatch, config, 'identity')
+    output = capsys.readouterr().out
+    assert 'hardware_status=mismatch' in output
+    assert identity['provisioning_secret'] not in output
+    assert identity['activation_code'] not in output
