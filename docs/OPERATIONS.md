@@ -177,3 +177,14 @@ recovery, storage full... deconectare USB" și "matrice reală Pi 4
   reală**: nu s-au putut rula în acest mediu de dezvoltare (fără hardware
   Raspberry Pi conectat). Rămâne explicit neacoperit de acest PR, urmărit
   separat.
+
+## Diagnostic clone / placă înlocuită
+
+`HardwareIdentityError` în jurnal oprește folosirea credentialelor pe o placă
+diferită ori când serialul anterior nu mai poate fi citit. `ems-device ... identity`
+și `health` funcționează fără re-enrollment și arată fingerprint-urile publice.
+Pe aceeași placă, restaurează accesul la Device Tree; pentru înlocuirea intenționată
+a plăcii, folosește factory reset cu confirmarea exactă a serialului, apoi noul
+Device Code. Nu copia binding-ul ori secretele de pe alt device ca remediu.
+Testele folosesc fișiere Device Tree sintetice, o copie reală a directorului
+SQLite și HTTP mock; nu constituie attestation sau verificare pe Pi fizic.
